@@ -1,0 +1,85 @@
+# Phase-0 feasibility experiment: can a GitHub-hosted runner evaluate all of
+# nixpkgs with nix-env without running out of memory?
+#
+# One-off, manually triggered. Reports peak memory + duration and uploads the
+# compressed eval JSON as an artifact. The real daily indexer workflow (PR 5)
+# supersedes this file.
+#
+# Note: private-repo ubuntu-latest is 2 vCPU / 7 GB, so this leans on the
+# swapfile; the plan's target for eval jobs is a 4-vCPU/16-GB larger runner
+# (or free public-repo standard runners if the repo goes public).
+name: eval-experiment
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Full nixpkgs commit hash to evaluate"
+        required: true
+      system:
+        description: "Nix system to evaluate"
+        required: true
+        default: x86_64-linux
+      runner:
+        description: "Runner label (ubuntu-latest, or a larger-runner label)"
+        required: true
+        default: ubuntu-latest
+
+jobs:
+  eval:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 180
+    steps:
+      - name: Add 16 GB swapfile
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Download nixpkgs tarball
+        run: |
+          curl -fsSL "https://codeload.github.com/NixOS/nixpkgs/tar.gz/${{ inputs.commit }}" -o nixpkgs.tar.gz
+          mkdir nixpkgs
+          tar -xzf nixpkgs.tar.gz --strip-components=1 -C nixpkgs
+          rm nixpkgs.tar.gz
+
+      - name: Evaluate with nix-env
+        run: |
+          # Mirrors Evaluate() in the old Go indexer: packages-config.nix
+          # forces nix-env to look at attribute sets it would otherwise skip
+          # (e.g. nodePackages.*).
+          config='{ allowInsecure = true; allowInsecurePredicate = (pkg: true); allowUnfree = true; allowUnfreePredicate = (pkg: true); }'
+          if [ -f nixpkgs/pkgs/top-level/packages-config.nix ]; then
+            config="(import ./nixpkgs/pkgs/top-level/packages-config.nix) // $config"
+          fi
+          export GC_INITIAL_HEAP_SIZE=6G
+          /usr/bin/time -v nix-env \
+            --file ./nixpkgs/default.nix \
+            --query --available --meta --out-path --show-trace --json \
+            --arg config "$config" \
+            --argstr system "${{ inputs.system }}" \
+            > eval.json 2> time.log || { cat time.log; exit 1; }
+          grep -E "Maximum resident|Elapsed|swaps" time.log || true
+
+      - name: Report + compress
+        run: |
+          echo "raw size: $(du -h eval.json | cut -f1)"
+          python3 -c "import json; d=json.load(open('eval.json')); print('attr paths:', len(d))"
+          sudo apt-get install -y zstd > /dev/null 2>&1 || true
+          zstd -19 -T0 eval.json -o eval.json.zst
+          echo "compressed: $(du -h eval.json.zst | cut -f1)"
+          free -h
+
+      - name: Upload eval artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ inputs.system }}-${{ inputs.commit }}
+          path: |
+            eval.json.zst
+            time.log
+          retention-days: 30
