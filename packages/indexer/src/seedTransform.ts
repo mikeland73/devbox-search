@@ -225,11 +225,6 @@ export function toVersionRow(name: string, version: string): VersionRow {
   };
 }
 
-/** The `top_level_attr` column: the attr path when it has no dot. */
-export function topLevelAttr(attrPath: string): string | null {
-  return attrPath.includes(".") ? null : attrPath;
-}
-
 /**
  * Compares the new sort-key ordering against sqlite's dense-int version_sort
  * for one package's versions, returning the pairs that changed relative

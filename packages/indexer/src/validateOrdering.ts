@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { isPrerelease } from "@devbox-search/core";
 import { compareVersionOrder, packageKey } from "./seedTransform.js";
+import { NAME_VERSION_SQL } from "./sqliteQueries.js";
 
 export interface OrderingReport {
   packages: number;
@@ -33,15 +34,14 @@ export function validateOrdering(
 ): OrderingReport {
   const sqlite = new Database(sqlitePath, { readonly: true, fileMustExist: true });
   try {
+    // Same query the seed's versions pass runs, so this report describes
+    // exactly the row set that will be seeded.
     const stmt = sqlite.prepare<[], {
       name: string;
       version: string;
       version_sort: number;
       prerelease: number;
-    }>(
-      `SELECT name, version, max(version_sort) AS version_sort, max(prerelease) AS prerelease
-       FROM pkg GROUP BY name, version ORDER BY name, version`,
-    );
+    }>(NAME_VERSION_SQL);
 
     const report: OrderingReport = {
       packages: 0,

@@ -8,7 +8,6 @@ import {
   toMetaRow,
   toVariantRow,
   toVersionRow,
-  topLevelAttr,
   versionKey,
   type SqlitePkgRow,
 } from "./seedTransform.js";
@@ -183,13 +182,6 @@ describe("toVersionRow", () => {
     const keys = ["3.9.1", "3.10.0", "3.11.0"].map((v) => Buffer.from(toVersionRow("p", v).sortKey));
     expect(Buffer.compare(keys[0]!, keys[1]!)).toBe(-1);
     expect(Buffer.compare(keys[1]!, keys[2]!)).toBe(-1);
-  });
-});
-
-describe("topLevelAttr", () => {
-  test("is the attr path only when it has no dot", () => {
-    expect(topLevelAttr("python311")).toBe("python311");
-    expect(topLevelAttr("python3Packages.requests")).toBeNull();
   });
 });
 

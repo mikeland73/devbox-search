@@ -15,7 +15,9 @@
  *   1. commits     — seq 1..N by unix_time, so seq order == time order.
  *   2. packages    — one row per lower(name), preserving sqlite's NOCASE
  *                    grouping (354 names have case variants).
- *   3. versions    — DISTINCT name+version, with the new sort_key. This pass
+ *   3. versions    — DISTINCT name+version (case-insensitive on name, so a
+ *                    version shared by case-variant spellings is one row),
+ *                    with the new sort_key. This pass
  *                    also collects the sort-key-vs-version_sort ordering diff
  *                    and any prerelease-flag divergence.
  *   4. meta        — full scan, COPYing each content hash the first time it
@@ -42,6 +44,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { createImportClient } from "@devbox-search/db";
 import { copyRows, type CopyValue } from "./copy.js";
+import { NAME_VERSION_SQL, PACKAGE_SPELLINGS_SQL } from "./sqliteQueries.js";
 import {
   canonicalSpelling,
   compareVersionOrder,
@@ -145,9 +148,10 @@ export async function seed(options: SeedOptions): Promise<SeedReport> {
       "packages",
       ["id", "name"],
       (function* () {
+        // COLLATE BINARY splits the case variants apart on purpose, so each
+        // spelling arrives with its own row count (see sqliteQueries.ts).
         const stmt = sqlite.prepare<[], { name: string; n: number }>(
-          `SELECT name, count(*) AS n FROM pkg
-           GROUP BY name COLLATE BINARY ORDER BY name COLLATE BINARY${limit}`,
+          `${PACKAGE_SPELLINGS_SQL}${limit}`,
         );
         // Buffer the spellings of one lower(name) group at a time. The
         // BINARY ordering keeps case variants of a name adjacent only if
@@ -192,15 +196,19 @@ export async function seed(options: SeedOptions): Promise<SeedReport> {
       (function* () {
         // Rows arrive grouped by name so the per-package ordering diff can be
         // computed with only one package buffered at a time.
+        //
+        // Unlike the packages query above, this one does NOT override the
+        // collation: the inherited NOCASE is what merges case-variant
+        // (name, version) pairs into one row, so this pass cannot emit two
+        // versions rows sharing a (package_id, version). Adding
+        // COLLATE BINARY here would violate versions_package_version_key.
+        // Full rationale and regression test in sqliteQueries.ts.
         const stmt = sqlite.prepare<[], {
           name: string;
           version: string;
           version_sort: number;
           prerelease: number;
-        }>(
-          `SELECT name, version, max(version_sort) AS version_sort, max(prerelease) AS prerelease
-           FROM pkg GROUP BY name, version ORDER BY name, version${limit}`,
-        );
+        }>(`${NAME_VERSION_SQL}${limit}`);
 
         let currentPackage = "";
         let buffered: Array<{ version: string; versionSort: number }> = [];
@@ -350,6 +358,10 @@ export async function seed(options: SeedOptions): Promise<SeedReport> {
     const ranges = rangeResult.rowCount ?? 0;
     log(`variant_ranges: ${ranges} (point ranges, seeded)`);
 
+    // top_level_attr is the attr_path when it has no dot (see the searchTerms
+    // doc comment in @devbox-search/db's schema.ts). Derived here in SQL
+    // rather than in TS so nothing is shipped client -> server for it; the
+    // importer must keep using this same definition.
     const termResult = await client.query(
       `INSERT INTO search_terms (package_id, name, attr_path, top_level_attr)
        SELECT DISTINCT p.id, p.name, v.attr_path,
