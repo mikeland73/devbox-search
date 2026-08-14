@@ -185,8 +185,16 @@ describe("hashing", () => {
   });
 
   test("hashes are stable across runs (golden)", () => {
-    // Golden values pin the canonical serialization; a change here means every
-    // stored meta_hash/content_hash would be invalidated.
+    // Literal digests pin the whole pipeline — field list, canonical
+    // serialization, and SHA-256 encoding. A change to any of them means every
+    // stored meta_hash/content_hash would be invalidated, so update these only
+    // deliberately (and plan a re-import).
+    expect(metaHash(pkg)).toBe("7e2aa28e6ea094f57559a6ce3e03bd89cb34ececb81775add94a1ce109653ad1");
+    expect(contentHash(pkg)).toBe("1005ccace6cbc119d5a5e830e77620ea9827fda93177205d1b290eb7bf3e41fb");
+  });
+
+  test("golden hashes cover the expected field list", () => {
+    // Companion to the literals above: shows which fields feed each hash.
     expect(metaHash(pkg)).toBe(sha256Hex(canonicalJson({
       description: "",
       homepage: "https://go.dev/",

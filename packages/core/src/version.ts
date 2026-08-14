@@ -21,6 +21,11 @@
  *     end-of-version like Nix does ("1.0" < "1.0q"), and numbers sort
  *     above letters ("1.0pre" < "1.0.1").
  *   - Numeric components compare numerically ("01" == "1").
+ *   - Alpha components compare case-insensitively ("1.0RC1" == "1.0rc1"),
+ *     which Nix does not do (it strcmps components). Case has to be folded
+ *     for the tag lookup anyway — "1.0-RC1" must land in the prerelease
+ *     class — and folding only there would make the order depend on whether
+ *     a run happens to be a known tag.
  *
  * sortKey() encodes a version into bytes whose bytewise order is exactly
  * compareVersions() order, so `latest` becomes max(sort_key) in SQL with no
@@ -54,7 +59,7 @@ type ComponentClass = "pretag" | "alpha" | "numeric";
 
 interface Component {
   cls: ComponentClass;
-  /** Digits with leading zeros stripped, or the (tag-lowercased) text. */
+  /** Digits with leading zeros stripped, or the lowercased text. */
   text: string;
 }
 
@@ -96,12 +101,10 @@ export function splitVersionComponents(version: string): Component[] {
       const stripped = run.replace(/^0+(?=.)/, "");
       components.push({ cls: "numeric", text: stripped });
     } else {
+      // Fold case for every alpha run, not just the ones that turn out to be
+      // known tags, so ordering never depends on the tag lookup.
       const lower = run.toLowerCase();
-      if (PRERELEASE_TAGS.has(lower)) {
-        components.push({ cls: "pretag", text: lower });
-      } else {
-        components.push({ cls: "alpha", text: run });
-      }
+      components.push({ cls: PRERELEASE_TAGS.has(lower) ? "pretag" : "alpha", text: lower });
     }
     i = j;
   }

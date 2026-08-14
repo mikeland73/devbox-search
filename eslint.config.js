@@ -9,5 +9,14 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }]
     }
+  },
+  {
+    // Plain Node scripts: no TS lib to declare the runtime globals they use.
+    files: ["tools/**/*.mjs"],
+    languageOptions: {
+      globals: Object.fromEntries(
+        ["Buffer", "URL", "console", "fetch", "process", "setTimeout"].map((g) => [g, "readonly"])
+      )
+    }
   }
 );

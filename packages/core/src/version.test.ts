@@ -121,6 +121,20 @@ describe("compareVersions", () => {
     check("2.3q", "2.3", 1);
   });
 
+  test("alpha components are case-insensitive", () => {
+    // Divergence from Nix, which strcmps components: case is folded for every
+    // alpha run, both known tags and unknown ones.
+    check("1.0.0RC1", "1.0.0rc1", 0);
+    check("1.0.0-RC1", "1.0.0-rc1", 0);
+    check("1.0.0Foo", "1.0.0foo", 0);
+    check("1.0.0FOO", "1.0.0foo", 0);
+    // Folding does not change class assignment or relative order.
+    check("1.0.0-RC1", "1.0.0", -1); // uppercase tag still sorts below release
+    check("1.0.0-Beta", "1.0.0-RC1", -1);
+    check("1.0.0Foo", "1.0.0", 1); // unknown alpha still sorts above
+    check("1.0.0Foo", "1.0.0goo", -1);
+  });
+
   test("semver-style prerelease ordering", () => {
     check("1.0.0-alpha", "1.0.0", -1);
     check("1.0.0-alpha", "1.0.0-alpha.1", -1);
@@ -151,9 +165,11 @@ describe("sortKey", () => {
       "1.0",
       "1.0.0",
       "2.3pre1",
+      "2.3PRE1",
       "2.3a",
       "2.3",
       "2.3q",
+      "2.3Q",
       "2.3.1",
       "3.11.0a2",
       "3.11.0-a4",
@@ -179,6 +195,8 @@ describe("sortKey", () => {
       fc.string(),
       fc.string({ unit: "binary" }),
       fc.stringMatching(/^v?[0-9]{1,4}(\.[0-9]{1,4}){0,3}(-?(a|b|c|rc|alpha|beta|pre|preview|q|dev)[0-9]{0,3})?$/),
+      // Mixed case, so the key/comparator agreement covers case folding.
+      fc.stringMatching(/^v?[0-9]{1,4}(\.[0-9]{1,4}){0,3}(-?(A|B|C|RC|rC|Alpha|BETA|Pre|PREVIEW|Q|Dev|Foo)[0-9]{0,3})?$/),
     );
     fc.assert(
       fc.property(versionish, versionish, (v, w) => {
@@ -191,7 +209,7 @@ describe("sortKey", () => {
   test("property: comparator is transitive and antisymmetric (total order)", () => {
     // Total order follows from the bytewise key equivalence, but check the
     // comparator directly on triples as documentation.
-    const versionish = fc.stringMatching(/^v?[0-9]{1,3}(\.[0-9]{1,3}){0,3}[a-z]{0,5}[0-9]{0,2}$/);
+    const versionish = fc.stringMatching(/^v?[0-9]{1,3}(\.[0-9]{1,3}){0,3}[a-zA-Z]{0,5}[0-9]{0,2}$/);
     fc.assert(
       fc.property(versionish, versionish, versionish, (a, b, c) => {
         expect(compareVersions(a, b)).toBe(-compareVersions(b, a));

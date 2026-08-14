@@ -31,6 +31,16 @@ jobs:
         with:
           fetch-depth: 1
 
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
@@ -39,6 +49,11 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # Deps are installed above; let the reviewer actually run the suite
+          # instead of reviewing from the diff alone. Kept to the four repo
+          # scripts plus node rather than a blanket Bash(pnpm:*).
+          claude_args: >-
+            --allowedTools "Bash(pnpm test:*),Bash(pnpm lint:*),Bash(pnpm typecheck:*),Bash(pnpm build:*),Bash(node:*)"
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 

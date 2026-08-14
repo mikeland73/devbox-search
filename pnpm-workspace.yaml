@@ -1,5 +1,8 @@
 packages:
   - packages/*
   - apps/*
+# esbuild (transitive via vitest -> vite) needs its postinstall to place the
+# platform binary. `allowBuilds` is pnpm 11's spelling of the script allow-list
+# (it replaced pnpm 10's `onlyBuiltDependencies`, which pnpm 11 ignores).
 allowBuilds:
   esbuild: true
