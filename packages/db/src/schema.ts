@@ -41,6 +41,13 @@ export const bytea = customType<{ data: Uint8Array; driverData: Buffer }>({
   dataType() {
     return "bytea";
   },
+  // Buffer.from(arrayBuffer, byteOffset, length) deliberately *views* the same
+  // memory rather than copying (unlike Buffer.from(typedArray)), and honours
+  // the offset so subarray views serialize correctly. Callers must hand over a
+  // buffer they don't mutate afterwards; sortKey()/contentHash() from
+  // @devbox-search/core allocate fresh arrays, so that holds today. Do not
+  // "simplify" this to Buffer.from(value) — that silently adds a copy per row
+  // on a multi-million-row import.
   toDriver(value: Uint8Array): Buffer {
     return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
   },
@@ -91,6 +98,13 @@ export const commitSystems = pgTable(
  * Names are stored NFD-normalized. Name matching is case-insensitive in the
  * API (the old sqlite column was COLLATE NOCASE), which the lower(name) index
  * serves; attr_path matching stays case-sensitive.
+ *
+ * Uniqueness is intentionally exact-case, not on lower(name): nixpkgs attribute
+ * paths are case-sensitive and do contain case-variant siblings, so a
+ * case-insensitive constraint would collapse two genuinely distinct packages
+ * (and fail the import when it did). The consequence is that a case-insensitive
+ * lookup can match more than one row; resolution is a query-layer rule (prefer
+ * the exact-case match, else the lowest id), not a storage-layer one.
  */
 export const packages = pgTable(
   "packages",
@@ -199,7 +213,9 @@ export const variants = pgTable(
     uniqueIndex("variants_identity_key").on(t.versionId, t.system, t.attrPath),
     // Attribute-path lookups: the API matches `name = ?1 OR attr_path = ?1`.
     index("variants_attr_path_idx").on(t.attrPath),
-    index("variants_version_idx").on(t.versionId),
+    // No standalone version_id index: variants_identity_key leads with
+    // version_id, so it already serves version_id equality lookups and the
+    // ON DELETE CASCADE from versions.
   ],
 );
 

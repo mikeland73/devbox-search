@@ -53,6 +53,17 @@ describe("schema invariants", () => {
     ]);
   });
 
+  test("variants has no redundant version_id index (identity_key leads with it)", () => {
+    const names = getTableConfig(variants).indexes.map((i) => i.config.name);
+    expect(names).toEqual(["variants_identity_key", "variants_attr_path_idx"]);
+  });
+
+  test("packages.name uniqueness is exact-case; lower(name) is indexed but not constrained", () => {
+    expect(initSql).toContain(`CREATE UNIQUE INDEX "packages_name_key" ON "packages" USING btree ("name")`);
+    expect(initSql).toContain(`CREATE INDEX "packages_name_lower_idx" ON "packages" USING btree (lower("name"))`);
+    expect(initSql).not.toMatch(/CREATE UNIQUE INDEX[^;]*lower\("name"\)/);
+  });
+
   test("version identity is (package, version) and content hashes are sha256-sized", () => {
     const versionCfg = getTableConfig(versions);
     expect(versionCfg.indexes.find((i) => i.config.name === "versions_package_version_key")?.config.unique).toBe(true);
@@ -98,5 +109,13 @@ describe("bytea custom type", () => {
     const view = backing.subarray(2, 5);
     const driver = column.mapToDriverValue(view) as Buffer;
     expect([...driver]).toEqual([1, 2, 3]);
+  });
+
+  test("views the caller's memory instead of copying it", () => {
+    // Intentional: a copy per row is real cost on a multi-million-row import.
+    // Callers must not mutate a sort_key/content_hash after handing it over.
+    const value = Uint8Array.from([1, 2, 3]);
+    const driver = column.mapToDriverValue(value) as Buffer;
+    expect(driver.buffer).toBe(value.buffer);
   });
 });

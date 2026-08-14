@@ -102,7 +102,6 @@ CREATE INDEX "variant_ranges_open_idx" ON "variant_ranges" USING btree ("variant
 CREATE INDEX "variant_ranges_span_idx" ON "variant_ranges" USING btree ("first_seq","last_seq");--> statement-breakpoint
 CREATE UNIQUE INDEX "variants_identity_key" ON "variants" USING btree ("version_id","system","attr_path");--> statement-breakpoint
 CREATE INDEX "variants_attr_path_idx" ON "variants" USING btree ("attr_path");--> statement-breakpoint
-CREATE INDEX "variants_version_idx" ON "variants" USING btree ("version_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "versions_package_version_key" ON "versions" USING btree ("package_id","version");--> statement-breakpoint
 CREATE INDEX "versions_latest_idx" ON "versions" USING btree ("package_id","prerelease","sort_key" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "versions_semver_idx" ON "versions" USING btree ("package_id","semver_major","semver_minor","semver_patch");

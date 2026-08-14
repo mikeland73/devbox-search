@@ -1,5 +1,5 @@
 {
-  "id": "e87355fd-180e-4216-ab1d-305a0c43bf4a",
+  "id": "169a227c-e1c6-4461-b6ad-da757858b17d",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -679,21 +679,6 @@
           "columns": [
             {
               "expression": "attr_path",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "variants_version_idx": {
-          "name": "variants_version_idx",
-          "columns": [
-            {
-              "expression": "version_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
