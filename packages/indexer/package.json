@@ -26,6 +26,7 @@
     "pg-copy-streams": "^7.0.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.5",
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^24.0.0",
     "@types/pg": "^8.11.0",

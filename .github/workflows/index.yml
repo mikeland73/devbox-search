@@ -1,0 +1,155 @@
+# Daily nixpkgs indexing: discover -> eval -> import.
+#
+# Runner sizing: private-repo `ubuntu-latest` is 2-vCPU/7 GB, which is too
+# small for a nix-env eval of all of nixpkgs. Eval therefore runs on a paid
+# 4-vCPU/16 GB larger runner plus a swapfile. If this repo ever goes public,
+# switch `eval` to the free 4-vCPU/16 GB standard runners and CI cost drops to
+# zero (darwin systems evaluate fine on Linux — this is pure evaluation).
+#
+# The import job runs with `if: always()` so a day where one system's eval
+# fails still imports the others; commit_systems records which (commit,
+# system) pairs landed, and a later run backfills the rest.
+name: index
+
+on:
+  schedule:
+    # 05:00 UTC daily, after the nixpkgs-unstable channel typically advances.
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max commits to index this run"
+        required: false
+        default: "4"
+
+# Serialize with the advisory lock the importer also takes.
+concurrency:
+  group: indexer
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      commits: ${{ steps.discover.outputs.commits }}
+      count: ${{ steps.discover.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      - id: discover
+        run: node packages/indexer/dist/cli.js discover --limit "${{ inputs.limit || '4' }}"
+        env:
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  eval:
+    needs: discover
+    if: needs.discover.outputs.count != '0'
+    runs-on: ${{ github.event.repository.private && 'ubuntu-latest-4-cores' || 'ubuntu-latest' }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        system:
+          - x86_64-linux
+          - aarch64-linux
+          - x86_64-darwin
+          - aarch64-darwin
+        commit: ${{ fromJSON(needs.discover.outputs.commits) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add swapfile
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      - name: Fetch nixpkgs
+        run: |
+          curl -fsSL "https://codeload.github.com/NixOS/nixpkgs/tar.gz/${{ matrix.commit.hash }}" -o nixpkgs.tar.gz
+          mkdir nixpkgs
+          tar -xzf nixpkgs.tar.gz --strip-components=1 -C nixpkgs
+          rm nixpkgs.tar.gz
+
+      - name: Evaluate
+        env:
+          # Nix's GC does badly with a small initial heap on a big eval.
+          GC_INITIAL_HEAP_SIZE: 6G
+        run: |
+          node packages/indexer/dist/cli.js eval \
+            --nixpkgs ./nixpkgs \
+            --system "${{ matrix.system }}" \
+            --out eval.json.gz
+
+      # The archive decouples eval from import: a failed import never forces a
+      # re-eval, and archived JSON can be replayed to backfill ranges.
+      - name: Archive eval to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          key="${{ matrix.system }}/$(date -u -d "${{ matrix.commit.committedAt }}" +%s)-${{ matrix.commit.hash }}.json.gz"
+          aws s3 cp eval.json.gz "s3://${{ secrets.R2_BUCKET }}/$key"
+          echo "archived $key"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ matrix.system }}-${{ matrix.commit.hash }}
+          path: eval.json.gz
+          retention-days: 3
+
+  import:
+    needs: [discover, eval]
+    # Import whatever succeeded: commit_systems tracks partial days and later
+    # runs backfill the missing systems.
+    if: always() && needs.discover.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: eval-*
+          path: evals
+
+      - name: Import
+        env:
+          # COPY and session advisory locks need the direct (unpooled)
+          # endpoint: Neon's pooler is transaction-mode pgbouncer.
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: node packages/indexer/dist/cli.js import --dir evals
+
+      - name: Summary
+        if: always()
+        run: node packages/indexer/dist/cli.js status >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}

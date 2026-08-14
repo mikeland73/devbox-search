@@ -7,7 +7,8 @@
  */
 
 import { describe, expect, test } from "vitest";
-// @ts-expect-error - plain .mjs tool module, no types
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - plain .mjs tool module, no type declarations
 import { classify } from "../../../tools/shadow-diff.mjs";
 
 const rev = (s: string) => s.repeat(40).slice(0, 40);

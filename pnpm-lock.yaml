@@ -128,6 +128,9 @@ importers:
         specifier: ^7.0.0
         version: 7.0.0
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.5
+        version: 0.5.5
       '@types/better-sqlite3':
         specifier: ^7.6.0
         version: 7.6.13
