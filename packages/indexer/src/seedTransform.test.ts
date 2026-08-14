@@ -119,7 +119,9 @@ describe("hashing agrees with core", () => {
   });
 
   test("content hash ignores nar (cache status), so it is reproducible from eval JSON", () => {
-    const { nar: _nar, ...outputWithoutNar } = row.json.outputs![0]!;
+    const output = { ...row.json.outputs![0]! };
+    delete output.nar;
+    const outputWithoutNar = output;
     const noNar: SqlitePkgRow = {
       ...row,
       json: { ...row.json, outputs: [outputWithoutNar] },
