@@ -27,6 +27,17 @@ function v2Resolve(version: string, revs: Record<string, string>, broken = false
   return { name: "python", version, summary: "s", systems };
 }
 
+/**
+ * The package's versions as the new service reports them (/v1/pkg), newest
+ * first under the new total order. This is the classifier's corroboration for
+ * `latest` divergences.
+ */
+function known(...versions: Array<string | { version: string; broken: boolean }>) {
+  return {
+    versions: versions.map((v) => (typeof v === "string" ? { version: v, broken: false } : v)),
+  };
+}
+
 describe("sanctioned classes", () => {
   test("#1 boundary matching: 3.1 stopped matching 3.11", () => {
     const path = "/v2/resolve?name=python&version=3.1";
@@ -59,11 +70,21 @@ describe("sanctioned classes", () => {
     expect(classify(path, old, next)).toBe("broken-skip");
   });
 
-  test("#4 sort order: latest resolves to a different version", () => {
+  test("#4 sort order: latest resolves to a version the new order ranks higher", () => {
     const path = "/v2/resolve?name=_389-ds-base&version=latest";
     const old = v2Resolve("3.0.5", { "x86_64-linux": rev("a") });
     const next = v2Resolve("3.1.1", { "x86_64-linux": rev("b") });
-    expect(classify(path, old, next)).toBe("sort-order");
+    expect(classify(path, old, next, known("3.1.1", "3.0.5", "2.4.0"))).toBe("sort-order");
+  });
+
+  test("#3 broken skip in the v2 shape, which carries no broken field", () => {
+    // The only evidence that this downgrade is sanctioned is the new service
+    // reporting the old answer as broken.
+    const path = "/v2/resolve?name=foo&version=latest";
+    const old = v2Resolve("2.0.0", { "x86_64-linux": rev("a") });
+    const next = v2Resolve("1.9.0", { "x86_64-linux": rev("b") });
+    const versions = known({ version: "2.0.0", broken: true }, { version: "1.9.0", broken: false });
+    expect(classify(path, old, next, versions)).toBe("broken-skip");
   });
 
   test("v1 array-shaped responses are classified too", () => {
@@ -106,6 +127,49 @@ describe("classifier precision (the gate would be meaningless without this)", ()
     // 3.2.0 is not a boundary match for "3.1".
     const next = v2Resolve("3.2.0", { "x86_64-linux": rev("a") });
     expect(classify(path, old, next)).toBeNull();
+  });
+
+  test("a latest request resolving to a bogus version is NOT sort-order", () => {
+    // `latest` is the CLI's most common request; if any divergence there
+    // counted as a reordering, a resolve bug would ride through the gate.
+    const path = "/v2/resolve?name=python&version=latest";
+    const old = v2Resolve("3.11.9", { "x86_64-linux": rev("a") });
+    const next = v2Resolve("0.0.0-garbage", { "x86_64-linux": rev("b") });
+    expect(classify(path, old, next, known("3.12.1", "3.11.9", "3.10.4"))).toBeNull();
+  });
+
+  test("a latest request resolving to a lower-ranked version is NOT sort-order", () => {
+    // A reordering can only move the answer up: the new service returns the
+    // top of the same set under the new order. Nothing else explains this.
+    const path = "/v2/resolve?name=python&version=latest";
+    const old = v2Resolve("3.12.1", { "x86_64-linux": rev("a") });
+    const next = v2Resolve("3.10.4", { "x86_64-linux": rev("b") });
+    expect(classify(path, old, next, known("3.12.1", "3.11.9", "3.10.4"))).toBeNull();
+  });
+
+  test("a latest answer that vanished from the package is NOT sort-order", () => {
+    // The old answer is not in the new service's version list at all, so the
+    // candidate set changed — that is not the sanctioned comparator change.
+    const path = "/v2/resolve?name=python&version=latest";
+    const old = v2Resolve("3.11.9", { "x86_64-linux": rev("a") });
+    const next = v2Resolve("3.12.1", { "x86_64-linux": rev("b") });
+    expect(classify(path, old, next, known("3.12.1", "3.10.4"))).toBeNull();
+  });
+
+  test("sort-order is not assumed when the version list is unavailable", () => {
+    const path = "/v2/resolve?name=python&version=latest";
+    const old = v2Resolve("3.11.9", { "x86_64-linux": rev("a") });
+    const next = v2Resolve("3.12.1", { "x86_64-linux": rev("b") });
+    expect(classify(path, old, next)).toBeNull();
+    expect(classify(path, old, next, { versions: null })).toBeNull();
+  });
+
+  test("a downgrade to another broken version is NOT broken-skip", () => {
+    const path = "/v2/resolve?name=foo&version=latest";
+    const old = v2Resolve("2.0.0", { "x86_64-linux": rev("a") });
+    const next = v2Resolve("1.9.0", { "x86_64-linux": rev("b") });
+    const versions = known({ version: "2.0.0", broken: true }, { version: "1.9.0", broken: true });
+    expect(classify(path, old, next, versions)).toBeNull();
   });
 
   test("missing bodies are never classified", () => {
