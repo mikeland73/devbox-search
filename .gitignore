@@ -7,3 +7,4 @@ dist/
 coverage/
 .next/
 next-env.d.ts
+.vercel/
