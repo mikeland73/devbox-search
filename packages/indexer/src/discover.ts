@@ -18,6 +18,9 @@ const GITHUB_COMMIT_URL = "https://api.github.com/repos/NixOS/nixpkgs/commits/";
 /** Same expression the Go indexer used. */
 const RE_RELEASE = /^nixpkgs\/(nixpkgs-[0-9.]+pre(\d+)\.([0-9a-f]{7,40}))\/$/;
 
+/** Commits queued per run, unless the caller says otherwise. */
+export const DEFAULT_LIMIT = 4;
+
 export interface Release {
   name: string;
   commitCount: number;
@@ -126,12 +129,49 @@ export function selectPending(
   knownHashes: ReadonlySet<string>,
   options: { limit?: number; headCommitCount?: number } = {},
 ): Release[] {
-  const limit = options.limit ?? 4;
+  const limit = options.limit ?? DEFAULT_LIMIT;
   const head = options.headCommitCount ?? 0;
   const pending = releases.filter(
     (r) => r.commitCount > head && !knownHashes.has(r.abbrevHash),
   );
   return pending.slice(0, limit);
+}
+
+/**
+ * selectPending for the caller that holds FULL commit hashes (the database).
+ *
+ * Two things this does that a naive hash comparison doesn't:
+ *
+ *  - Release directories abbreviate to varying lengths (7..40 chars), so every
+ *    known hash is truncated to each length that actually appears in the
+ *    listing before comparing.
+ *  - The newest release we've already imported becomes `headCommitCount`. The
+ *    S3 listing goes back to the start of the bucket, and `selectPending`
+ *    takes the OLDEST unknown releases first, so without this bound any old
+ *    release that was never indexed (a gap, or history before the seed) would
+ *    be picked every single day — burning a full eval on a commit the importer
+ *    then refuses for being older than the DB head, and starving out the new
+ *    commits that actually need indexing.
+ *
+ * `knownHashes` must therefore be EVERY imported commit, not a recent window.
+ */
+export function selectPendingForCommits(
+  releases: Release[],
+  knownHashes: Iterable<string>,
+  options: { limit?: number } = {},
+): Release[] {
+  const lengths = new Set(releases.map((r) => r.abbrevHash.length));
+  const known = new Set<string>();
+  for (const hash of knownHashes) {
+    for (const n of lengths) known.add(hash.slice(0, n));
+  }
+
+  let headCommitCount = 0;
+  for (const r of releases) {
+    if (known.has(r.abbrevHash) && r.commitCount > headCommitCount) headCommitCount = r.commitCount;
+  }
+
+  return selectPending(releases, known, { limit: options.limit ?? DEFAULT_LIMIT, headCommitCount });
 }
 
 /** The codeload tarball URL for a commit — ~45 MB, no git clone needed. */

@@ -52,7 +52,9 @@ jobs:
   eval:
     needs: discover
     if: needs.discover.outputs.count != '0'
-    runs-on: ${{ github.event.repository.private && 'ubuntu-latest-4-cores' || 'ubuntu-latest' }}
+    # github.repository_visibility, not github.event.repository.private: the
+    # event payload varies by trigger, and this job's real trigger is the cron.
+    runs-on: ${{ github.repository_visibility == 'public' && 'ubuntu-latest' || 'ubuntu-latest-4-cores' }}
     timeout-minutes: 180
     strategy:
       fail-fast: false

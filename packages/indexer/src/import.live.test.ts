@@ -6,9 +6,10 @@
  * history rather than failing loudly. These tests drive the real SQL through
  * a multi-day scenario.
  *
- * PGlite has no wire protocol, so the pg-based COPY path can't be exercised
- * here; the SQL statements are executed through the same helper the importer
- * uses, with COPY replaced by multi-row INSERT. copy.test.ts covers the COPY
+ * Every statement here comes from importSql.ts — the same strings import.ts
+ * executes — so the merge logic can't drift away from what's tested. PGlite
+ * has no wire protocol, so the only substitution is staging: COPY becomes
+ * per-row INSERT into the identical temp tables. copy.test.ts covers the COPY
  * encoding itself.
  */
 
@@ -20,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { canonicalName, contentHash, decodeEvalJson, metaHash } from "@devbox-search/core";
 import { packageKey, toVersionRow } from "./seedTransform.js";
+import * as SQL from "./importSql.js";
 
 const MIGRATION = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -62,9 +64,26 @@ function evalJson(entries: Record<string, { version: string; broken?: boolean; s
 }
 
 /**
- * Runs the importer's SQL against PGlite. This mirrors import.ts step for
- * step; COPY into the temp tables becomes INSERT since PGlite has no COPY
- * FROM STDIN over a driver connection.
+ * PGlite's stand-in for copyRows: loads the same temp table with the same
+ * columns, one INSERT per row.
+ */
+async function stage(table: string, columns: string[], values: unknown[][]): Promise<void> {
+  const sql =
+    `INSERT INTO ${table} (${columns.map((c) => `"${c}"`).join(", ")}) ` +
+    `VALUES (${columns.map((_, i) => `$${i + 1}`).join(", ")})`;
+  for (const row of values) await db.query(sql, row.map(toParam));
+}
+
+/** COPY text format encodes these itself; the driver needs them pre-encoded. */
+function toParam(value: unknown): unknown {
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  if (value !== null && typeof value === "object") return JSON.stringify(value); // jsonb
+  return value;
+}
+
+/**
+ * Runs the importer's SQL against PGlite: the statements are importSql.ts
+ * verbatim, in importEval's order, with COPY replaced by `stage`.
  */
 async function runImport(json: unknown, commitHash: string, committedAt: Date, system: string) {
   const decoded = decodeEvalJson(json, commitHash, committedAt);
@@ -81,20 +100,14 @@ async function runImport(json: unknown, commitHash: string, committedAt: Date, s
 
   await db.exec("BEGIN");
 
-  const already = await db.query<{ seq: number }>(
-    `SELECT c.seq FROM commits c JOIN commit_systems cs ON cs.commit_seq = c.seq AND cs.system = $2
-     WHERE c.hash = $1`,
-    [commitHash, system],
-  );
+  const already = await db.query<{ seq: number }>(SQL.EXISTING_IMPORT, [commitHash, system]);
   if (already.rows.length > 0) {
     await db.exec("ROLLBACK");
     return { skipped: true, commitSeq: already.rows[0]!.seq, changed: 0, opened: 0, closed: 0 };
   }
 
-  const head = await db.query<{ seq: number; committed_at: Date }>(
-    `SELECT seq, committed_at FROM commits ORDER BY seq DESC LIMIT 1`,
-  );
-  const known = await db.query<{ seq: number }>(`SELECT seq FROM commits WHERE hash = $1`, [commitHash]);
+  const head = await db.query<{ seq: number; committed_at: Date }>(SQL.HEAD_COMMIT);
+  const known = await db.query<{ seq: number }>(SQL.COMMIT_BY_HASH, [commitHash]);
   let commitSeq: number;
   if (known.rows.length > 0) {
     commitSeq = known.rows[0]!.seq;
@@ -105,177 +118,109 @@ async function runImport(json: unknown, commitHash: string, committedAt: Date, s
       throw new Error("refusing commit not newer than DB head");
     }
     commitSeq = (headRow?.seq ?? 0) + 1;
-    await db.query(`INSERT INTO commits (seq, hash, committed_at) VALUES ($1, $2, $3)`, [
-      commitSeq,
-      commitHash,
-      committedAt.toISOString(),
-    ]);
+    await db.query(SQL.INSERT_COMMIT, [commitSeq, commitHash, committedAt.toISOString()]);
   }
 
-  const prev = await db.query<{ seq: number }>(
-    `SELECT commit_seq AS seq FROM commit_systems WHERE system = $1 AND commit_seq < $2
-     ORDER BY commit_seq DESC LIMIT 1`,
-    [system, commitSeq],
-  );
+  const prev = await db.query<{ seq: number }>(SQL.PREV_SYSTEM_SEQ, [system, commitSeq]);
   const prevSeq = prev.rows[0]?.seq ?? null;
 
-  await db.exec(`
-    CREATE TEMP TABLE stage_keys (
-      name text NOT NULL, name_key text NOT NULL, version text NOT NULL,
-      attr_path text NOT NULL, meta_hash char(64) NOT NULL, content_hash char(64) NOT NULL
-    ) ON COMMIT DROP
-  `);
-  for (const r of rows) {
-    await db.query(
-      `INSERT INTO stage_keys (name, name_key, version, attr_path, meta_hash, content_hash)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [r.name, packageKey(r.name), r.version, r.pkg.attrPath, r.metaHash, r.contentHash],
+  await db.exec(SQL.STAGE_KEYS_DDL);
+  await stage(
+    "stage_keys",
+    SQL.STAGE_KEYS_COLUMNS,
+    rows.map((r) => [r.name, packageKey(r.name), r.version, r.pkg.attrPath, r.metaHash, r.contentHash]),
+  );
+  await db.exec(SQL.STAGE_KEYS_INDEX);
+
+  await db.exec(SQL.INSERT_PACKAGES);
+
+  const missingVersions = await db.query<{ name_key: string; version: string }>(SQL.MISSING_VERSIONS);
+  if (missingVersions.rows.length > 0) {
+    await db.exec(SQL.STAGE_VERSIONS_DDL);
+    await stage(
+      "stage_versions",
+      SQL.STAGE_VERSIONS_COLUMNS,
+      missingVersions.rows.map((r) => {
+        const v = toVersionRow(r.name_key, r.version);
+        return [
+          r.name_key,
+          r.version,
+          v.sortKey,
+          v.prerelease,
+          v.semverMajor,
+          v.semverMinor,
+          v.semverPatch,
+          v.semverPre,
+        ];
+      }),
     );
+    await db.exec(SQL.INSERT_VERSIONS);
   }
 
-  await db.exec(`
-    INSERT INTO packages (name)
-    SELECT DISTINCT ON (s.name_key) s.name FROM stage_keys s
-    WHERE NOT EXISTS (SELECT 1 FROM packages p WHERE lower(p.name) = s.name_key)
-    ORDER BY s.name_key, s.name
-    ON CONFLICT DO NOTHING
-  `);
-
-  const missingVersions = await db.query<{ name_key: string; version: string }>(`
-    SELECT DISTINCT s.name_key, s.version FROM stage_keys s
-    JOIN packages p ON lower(p.name) = s.name_key
-    WHERE NOT EXISTS (SELECT 1 FROM versions v WHERE v.package_id = p.id AND v.version = s.version)
-  `);
-  for (const r of missingVersions.rows) {
-    const v = toVersionRow(r.name_key, r.version);
-    await db.query(
-      `INSERT INTO versions (package_id, version, sort_key, prerelease, semver_major, semver_minor, semver_patch, semver_pre)
-       SELECT p.id, $2, $3, $4, $5, $6, $7, $8 FROM packages p WHERE lower(p.name) = $1
-       ON CONFLICT (package_id, version) DO NOTHING`,
-      [
-        r.name_key,
-        r.version,
-        Buffer.from(v.sortKey),
-        v.prerelease,
-        v.semverMajor,
-        v.semverMinor,
-        v.semverPatch,
-        v.semverPre,
-      ],
-    );
-  }
-
-  const missingMeta = await db.query<{ meta_hash: string }>(`
-    SELECT DISTINCT s.meta_hash FROM stage_keys s
-    WHERE NOT EXISTS (SELECT 1 FROM meta m WHERE m.hash = s.meta_hash)
-  `);
-  const wantedMeta = new Set(missingMeta.rows.map((r) => r.meta_hash));
-  const seenMeta = new Set<string>();
-  for (const r of rows) {
-    if (!wantedMeta.has(r.metaHash) || seenMeta.has(r.metaHash)) continue;
-    seenMeta.add(r.metaHash);
-    await db.query(
-      `INSERT INTO meta (hash, summary, description, homepage, license, platforms)
-       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (hash) DO NOTHING`,
-      [r.metaHash, r.pkg.summary, r.pkg.description, r.pkg.homepage, r.pkg.license, JSON.stringify(r.pkg.platforms)],
-    );
+  const missingMeta = await db.query<{ meta_hash: string }>(SQL.MISSING_META);
+  if (missingMeta.rows.length > 0) {
+    const wanted = new Set(missingMeta.rows.map((r) => r.meta_hash));
+    const seen = new Set<string>();
+    const blobs: unknown[][] = [];
+    for (const r of rows) {
+      if (!wanted.has(r.metaHash) || seen.has(r.metaHash)) continue;
+      seen.add(r.metaHash);
+      blobs.push([
+        r.metaHash,
+        r.pkg.summary,
+        r.pkg.description,
+        r.pkg.homepage,
+        r.pkg.license,
+        r.pkg.platforms,
+      ]);
+    }
+    await db.exec(SQL.STAGE_META_DDL);
+    await stage("stage_meta", SQL.STAGE_META_COLUMNS, blobs);
+    await db.exec(SQL.INSERT_META);
   }
 
   const changed = await db.query<{ name_key: string; version: string; attr_path: string }>(
-    `
-    SELECT s.name_key, s.version, s.attr_path FROM stage_keys s
-    JOIN packages p ON lower(p.name) = s.name_key
-    JOIN versions v ON v.package_id = p.id AND v.version = s.version
-    LEFT JOIN variants va ON va.version_id = v.id AND va.system = $1 AND va.attr_path = s.attr_path
-    WHERE va.id IS NULL OR va.content_hash <> s.content_hash
-  `,
+    SQL.CHANGED_VARIANTS,
     [system],
   );
 
-  const wantedVariants = new Set(changed.rows.map((r) => `${r.name_key}\t${r.version}\t${r.attr_path}`));
-  for (const r of rows) {
-    if (!wantedVariants.has(`${packageKey(r.name)}\t${r.version}\t${r.pkg.attrPath}`)) continue;
-    await db.query(
-      `
-      INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, store_hash,
-                            store_name, meta_name, meta_version, program, broken, insecure, outputs, content_hash)
-      SELECT v.id, $1, $2, m.id, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
-      FROM packages p
-      JOIN versions v ON v.package_id = p.id AND v.version = $14
-      JOIN meta m ON m.hash = $13
-      WHERE lower(p.name) = $15
-      ON CONFLICT (version_id, system, attr_path) DO UPDATE SET
-        meta_id = EXCLUDED.meta_id, commit_seq = EXCLUDED.commit_seq,
-        store_hash = EXCLUDED.store_hash, store_name = EXCLUDED.store_name,
-        meta_name = EXCLUDED.meta_name, meta_version = EXCLUDED.meta_version,
-        program = EXCLUDED.program, broken = EXCLUDED.broken, insecure = EXCLUDED.insecure,
-        outputs = EXCLUDED.outputs, content_hash = EXCLUDED.content_hash
-    `,
-      [
-        system,
-        r.pkg.attrPath,
-        commitSeq,
-        r.pkg.storeHash,
-        r.pkg.storeName,
-        r.pkg.metaName,
-        JSON.stringify(r.pkg.metaVersion),
-        r.pkg.program,
-        r.pkg.broken,
-        r.pkg.insecure,
-        JSON.stringify(r.pkg.outputs),
-        r.contentHash,
-        r.metaHash,
-        r.version,
-        packageKey(r.name),
-      ],
+  if (changed.rows.length > 0) {
+    const wanted = new Set(changed.rows.map((r) => `${r.name_key}\t${r.version}\t${r.attr_path}`));
+    await db.exec(SQL.STAGE_VARIANTS_DDL);
+    await stage(
+      "stage_variants",
+      SQL.STAGE_VARIANTS_COLUMNS,
+      rows
+        .filter((r) => wanted.has(`${packageKey(r.name)}\t${r.version}\t${r.pkg.attrPath}`))
+        .map((r) => [
+          packageKey(r.name),
+          r.version,
+          r.pkg.attrPath,
+          r.metaHash,
+          r.pkg.storeHash,
+          r.pkg.storeName,
+          r.pkg.metaName,
+          r.pkg.metaVersion,
+          r.pkg.program,
+          r.pkg.broken,
+          r.pkg.insecure,
+          r.pkg.outputs,
+          r.contentHash,
+        ]),
     );
+    await db.query(SQL.UPSERT_VARIANTS, [system, commitSeq]);
   }
 
   let closed = 0;
   if (prevSeq !== null) {
-    const result = await db.query(
-      `
-      UPDATE variant_ranges r SET last_seq = $2
-      FROM variants va
-      JOIN versions v ON v.id = va.version_id
-      JOIN packages p ON p.id = v.package_id
-      WHERE r.variant_id = va.id AND r.last_seq IS NULL AND va.system = $1
-        AND NOT EXISTS (
-          SELECT 1 FROM stage_keys s
-          WHERE s.name_key = lower(p.name) AND s.version = v.version AND s.attr_path = va.attr_path
-        )
-    `,
-      [system, prevSeq],
-    );
+    const result = await db.query(SQL.CLOSE_RANGES, [system, prevSeq]);
     closed = result.affectedRows ?? 0;
   }
 
-  const opened = await db.query(
-    `
-    INSERT INTO variant_ranges (variant_id, first_seq, last_seq, seeded)
-    SELECT va.id, $2, NULL, false
-    FROM stage_keys s
-    JOIN packages p ON lower(p.name) = s.name_key
-    JOIN versions v ON v.package_id = p.id AND v.version = s.version
-    JOIN variants va ON va.version_id = v.id AND va.system = $1 AND va.attr_path = s.attr_path
-    WHERE NOT EXISTS (SELECT 1 FROM variant_ranges r WHERE r.variant_id = va.id AND r.last_seq IS NULL)
-    ON CONFLICT (variant_id, first_seq) DO NOTHING
-  `,
-    [system, commitSeq],
-  );
+  const opened = await db.query(SQL.OPEN_RANGES, [system, commitSeq]);
 
-  await db.exec(`
-    INSERT INTO search_terms (package_id, name, attr_path, top_level_attr)
-    SELECT DISTINCT p.id, p.name, s.attr_path,
-           CASE WHEN position('.' in s.attr_path) = 0 THEN s.attr_path END
-    FROM stage_keys s JOIN packages p ON lower(p.name) = s.name_key
-    ON CONFLICT (name, attr_path) DO NOTHING
-  `);
-
-  await db.query(
-    `INSERT INTO commit_systems (commit_seq, system) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-    [commitSeq, system],
-  );
+  await db.exec(SQL.INSERT_SEARCH_TERMS);
+  await db.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, system]);
   await db.exec("COMMIT");
 
   return {

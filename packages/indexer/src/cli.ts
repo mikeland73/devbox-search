@@ -12,7 +12,7 @@ import { basename, join } from "node:path";
 import { createGunzip } from "node:zlib";
 import { text } from "node:stream/consumers";
 import { createImportClient } from "@devbox-search/db";
-import { listUnstableReleases, resolveCommit, selectPending } from "./discover.js";
+import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits } from "./discover.js";
 import { evaluate } from "./evaluate.js";
 import { importEval } from "./import.js";
 
@@ -38,29 +38,24 @@ function setOutput(name: string, value: string): void {
 }
 
 async function cmdDiscover(): Promise<void> {
-  const limit = Number(arg("limit") ?? "4");
+  const limit = Number(arg("limit") ?? String(DEFAULT_LIMIT));
   const { pool } = createImportClient();
   try {
+    // EVERY imported commit, not a recent window: selectPendingForCommits
+    // takes the oldest unknown release first, so a hash missing from this set
+    // gets re-queued forever. One row is a 40-char hash; even 100k is nothing.
     const [releases, known] = await Promise.all([
       listUnstableReleases(),
-      pool.query<{ hash: string; committed_at: Date; seq: number }>(
-        `SELECT hash, committed_at, seq FROM commits ORDER BY seq DESC LIMIT 500`,
-      ),
+      pool.query<{ hash: string }>(`SELECT hash FROM commits`),
     ]);
 
-    // Match on the abbreviated hash the release directory carries.
-    const knownAbbrev = new Set(known.rows.map((r) => r.hash.slice(0, 12)));
-    const pending = selectPending(
-      releases,
-      // Compare on the release's own abbreviation length.
-      new Set([...knownAbbrev].flatMap((h) => [h, h.slice(0, 7)])),
-      { limit },
-    ).filter((r) => !known.rows.some((k) => k.hash.startsWith(r.abbrevHash)));
+    const knownHashes = new Set(known.rows.map((r) => r.hash));
+    const pending = selectPendingForCommits(releases, knownHashes, { limit });
 
     const commits = [];
     for (const release of pending) {
       const { hash, committedAt } = await resolveCommit(release.abbrevHash);
-      if (known.rows.some((k) => k.hash === hash)) continue;
+      if (knownHashes.has(hash)) continue;
       commits.push({ hash, committedAt: committedAt.toISOString(), release: release.name });
     }
     console.log(`${releases.length} releases, ${commits.length} to index`);
@@ -107,16 +102,12 @@ async function cmdImport(): Promise<void> {
   }
 
   // Import oldest commit first so commit seq stays dense and ordered; within
-  // a commit the system order doesn't matter.
-  const { pool } = createImportClient();
+  // a commit the system order doesn't matter. Dates come from the GitHub API,
+  // not the DB — importEval opens its own connection.
   const dates = new Map<string, Date>();
-  try {
-    for (const entry of new Set(entries.map((e) => e.commit))) {
-      const { committedAt } = await resolveCommit(entry);
-      dates.set(entry, committedAt);
-    }
-  } finally {
-    await pool.end();
+  for (const commit of new Set(entries.map((e) => e.commit))) {
+    const { committedAt } = await resolveCommit(commit);
+    dates.set(commit, committedAt);
   }
   entries.sort((a, b) => {
     const da = dates.get(a.commit)!.getTime();

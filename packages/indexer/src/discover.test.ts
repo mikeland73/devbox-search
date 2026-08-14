@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { listUnstableReleases, resolveCommit, selectPending, tarballUrl } from "./discover.js";
+import {
+  listUnstableReleases,
+  resolveCommit,
+  selectPending,
+  selectPendingForCommits,
+  tarballUrl,
+} from "./discover.js";
 
 /** A realistic S3 list-objects-v2 response with delimiter=/. */
 function s3Xml(prefixes: string[], nextToken?: string): string {
@@ -84,6 +90,44 @@ describe("selectPending", () => {
 
   test("returns nothing when everything is known", () => {
     expect(selectPending(releases, new Set(releases.map((r) => r.abbrevHash)))).toEqual([]);
+  });
+});
+
+describe("selectPendingForCommits", () => {
+  /** Full 40-char hashes, as the commits table stores them. */
+  const full = (abbrev: string) => abbrev + "f".repeat(40 - abbrev.length);
+
+  const releases = [
+    { name: "r1", commitCount: 100, abbrevHash: "aaaaaaa" }, // 7 chars
+    { name: "r2", commitCount: 200, abbrevHash: "bbbbbbbbbbbb" }, // 12 chars
+    { name: "r3", commitCount: 300, abbrevHash: "ccccccccccccccc" }, // 15 chars
+    { name: "r4", commitCount: 400, abbrevHash: "ddddddd" },
+    { name: "r5", commitCount: 500, abbrevHash: "eeeeeee" },
+  ];
+
+  test("matches full hashes at whatever length each release abbreviates to", () => {
+    const known = [full("aaaaaaa"), full("bbbbbbbbbbbb"), full("ccccccccccccccc")];
+    expect(selectPendingForCommits(releases, known).map((r) => r.name)).toEqual(["r4", "r5"]);
+  });
+
+  test("never re-queues a release older than the newest imported one", () => {
+    // r1 and r2 were never indexed (history before the seed). Without a head
+    // bound they'd be picked first, every run, forever: the importer refuses
+    // commits older than the DB head, so the eval would be pure waste.
+    const known = [full("ccccccccccccccc")];
+    expect(selectPendingForCommits(releases, known).map((r) => r.name)).toEqual(["r4", "r5"]);
+  });
+
+  test("an empty database starts at the oldest release", () => {
+    expect(selectPendingForCommits(releases, [], { limit: 1 }).map((r) => r.name)).toEqual(["r1"]);
+  });
+
+  test("returns nothing once the head is the newest release", () => {
+    expect(selectPendingForCommits(releases, [full("eeeeeee")])).toEqual([]);
+  });
+
+  test("still honours the limit", () => {
+    expect(selectPendingForCommits(releases, [], { limit: 2 })).toHaveLength(2);
   });
 });
 
