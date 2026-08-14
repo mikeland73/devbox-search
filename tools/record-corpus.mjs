@@ -28,7 +28,6 @@ const baseUrl = process.argv[3] ?? "https://search.devbox.sh";
 // (python311), multi-output packages, prerelease-heavy packages, unicode,
 // misses, and error shapes.
 const NAMES = ["python", "go", "hello", "nodejs", "ruby", "php", "python311", "nodePackages.typescript", "gcc", "openssl"];
-const VERSIONS = ["latest", "3", "3.11", "3.11.9", "1.22", "18", "9.99.99", ""];
 
 const requests = [];
 const add = (path) => requests.push(path);
