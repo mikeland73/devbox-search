@@ -16,7 +16,7 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "seed": "node --experimental-strip-types src/seed.ts"
+    "seed": "node dist/seed.js"
   },
   "dependencies": {
     "@devbox-search/core": "workspace:*",

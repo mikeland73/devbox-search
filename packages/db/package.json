@@ -22,7 +22,7 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate": "drizzle-kit generate",
-    "migrate": "node --experimental-strip-types src/migrate.ts"
+    "migrate": "node dist/migrate.js"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.0",
