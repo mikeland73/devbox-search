@@ -21,9 +21,9 @@ code: accounts, credentials, decisions, and the order to do them in.
   forever** rather than failing, so a stuck `queued` eval is this, not a
   capacity blip. Blacksmith also doesn't support personal accounts. The
   order of preference now:
-  1. **Standard free `ubuntu-latest` (2 vCPU / 7 GB) plus swap**, if the eval
-     fits — being measured by `eval-experiment` (see 0.2). Private repo, $0
-     within the Pro plan's included minutes.
+  1. ~~**Standard free `ubuntu-latest` (2 vCPU / 7 GB) plus swap**~~ —
+     **tested 2026-09-16, does not fit** (see 0.2). And it wouldn't have been
+     free anyway: 4 evals/day blows past the Pro plan's 3,000 included minutes.
   2. **Make the repo public** — free 4-vCPU/16 GB runners, unlimited minutes.
      `index.yml` already switches on `repository_visibility`. History was
      scanned 2026-09-16 and is clean; the Claude workflows are gated to the
@@ -139,9 +139,14 @@ Dispatch it from the branch that has the adaptive swapfile step (PR #12, or
 - [x] Run **eval-experiment** on `ubuntu-latest` — run 35136891482,
       `x86_64-linux` at `6b5e5b7a` (2026-09-16); earlier attempts died on the
       swapfile step, see below
-- [ ] Record peak RSS, wall time, and output size from the job log
-      (`/usr/bin/time -v` lines: "Maximum resident set size", "Elapsed")
-- [ ] Decide 0.1 from the numbers
+- [x] Result: **does not fit.** Runner had 7.8 GB RAM, 2 vCPU, 14 GB free
+      disk → 8.4 GB swap total. `nix-env` ran 36 min, then GitHub killed the
+      VM (`exit 143`, "runner has received a shutdown signal") — the
+      swap-thrash signature, not the 180-min timeout. Peak RSS unrecorded
+      but >7.8 GB and not sustainable on 8 GB of swap. Option 1 is out.
+- [ ] Decide 0.1 from what's left: public repo (16 GB + swap) is the only
+      free option; Vercel Sandbox's 16 GB with no swap is risky given the
+      eval clearly needs well over 8 GB.
 
 If it OOMs even with swap, the ordered fallbacks are: make the repo public
 (16 GB + swap), `nix-eval-jobs --workers 2 --max-memory-size 6000` (needs an
