@@ -1,11 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  listUnstableReleases,
-  resolveCommit,
-  selectPending,
-  selectPendingForCommits,
-  tarballUrl,
-} from "./discover.js";
+import { listUnstableReleases, resolveCommit, selectPending, selectPendingForCommits, tarballUrl, withBackfill } from "./discover.js";
 
 /** A realistic S3 list-objects-v2 response with delimiter=/. */
 function s3Xml(prefixes: string[], nextToken?: string): string {
@@ -178,5 +172,28 @@ describe("tarballUrl", () => {
     expect(tarballUrl("a".repeat(40))).toBe(
       `https://codeload.github.com/NixOS/nixpkgs/tar.gz/${"a".repeat(40)}`,
     );
+  });
+});
+
+describe("withBackfill", () => {
+  const c = (hash: string, systems: string[]) => ({ hash, systems });
+
+  test("known commits missing a system come before new releases", () => {
+    const out = withBackfill([c("old", ["x86_64-linux"])], [c("new1", []), c("new2", [])], 10);
+    expect(out.map((x) => x.hash)).toEqual(["old", "new1", "new2"]);
+  });
+
+  test("the limit caps the combined list, backfills first", () => {
+    const out = withBackfill([c("b1", ["s"]), c("b2", ["s"])], [c("n1", []), c("n2", [])], 3);
+    expect(out.map((x) => x.hash)).toEqual(["b1", "b2", "n1"]);
+  });
+
+  test("a hash present in both lists is emitted once, as the backfill", () => {
+    const out = withBackfill([c("dup", ["aarch64-linux"])], [c("dup", []), c("n", [])], 10);
+    expect(out).toEqual([c("dup", ["aarch64-linux"]), c("n", [])]);
+  });
+
+  test("no backfills is just the pending list", () => {
+    expect(withBackfill([], [c("n", [])], 4)).toEqual([c("n", [])]);
   });
 });

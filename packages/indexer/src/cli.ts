@@ -1,7 +1,9 @@
 /**
  * Indexer CLI, driven by .github/workflows/index.yml.
  *
- *   cli.js discover --limit 4     list commits needing indexing (GH output)
+ *   cli.js discover --limit 4 --systems a,b,c
+ *                                 list commits needing indexing (GH output):
+ *                                 new releases plus known commits missing a system
  *   cli.js eval --nixpkgs DIR --system S --commit H --committed-at T --out F
  *   cli.js import --dir evals     import every archived eval in a directory
  *   cli.js status                 a markdown summary of the index
@@ -10,7 +12,8 @@
 import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createImportClient } from "@devbox-search/db";
-import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits } from "./discover.js";
+import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits, withBackfill } from "./discover.js";
+import { INCOMPLETE_COMMITS } from "./importSql.js";
 import { evaluate } from "./evaluate.js";
 import { importEval } from "./import.js";
 import { readEvalArchive } from "./readEval.js";
@@ -38,6 +41,7 @@ function setOutput(name: string, value: string): void {
 
 async function cmdDiscover(): Promise<void> {
   const limit = Number(arg("limit") ?? String(DEFAULT_LIMIT));
+  const systems = arg("systems")?.split(",").map((s) => s.trim()).filter((s) => s !== "");
   const { pool } = createImportClient();
   try {
     // EVERY imported commit, not a recent window: selectPendingForCommits
@@ -51,14 +55,30 @@ async function cmdDiscover(): Promise<void> {
     const knownHashes = new Set(known.rows.map((r) => r.hash));
     const pending = selectPendingForCommits(releases, knownHashes, { limit });
 
-    const commits = [];
+    const fresh = [];
     for (const release of pending) {
       const { hash, committedAt } = await resolveCommit(release.abbrevHash);
       if (knownHashes.has(hash)) continue;
-      commits.push({ hash, committedAt: committedAt.toISOString(), release: release.name });
+      fresh.push({ hash, committedAt: committedAt.toISOString(), release: release.name, systems: systems ?? [] });
     }
-    console.log(`${releases.length} releases, ${commits.length} to index`);
-    for (const c of commits) console.log(`  ${c.hash.slice(0, 12)} ${c.committedAt} ${c.release}`);
+
+    // Known commits with a system still missing (an eval that failed or has
+    // not landed yet). Only when --systems is given: without the expected
+    // list there is nothing to compare against.
+    const incomplete = [];
+    if (systems !== undefined) {
+      const rows = await pool.query<{ hash: string; committed_at: Date; missing: string[] }>(
+        INCOMPLETE_COMMITS,
+        [systems],
+      );
+      for (const r of rows.rows) {
+        incomplete.push({ hash: r.hash, committedAt: r.committed_at.toISOString(), release: "(backfill)", systems: r.missing });
+      }
+    }
+
+    const commits = withBackfill(incomplete, fresh, limit);
+    console.log(`${releases.length} releases, ${incomplete.length} incomplete in DB, ${commits.length} to index`);
+    for (const c of commits) console.log(`  ${c.hash.slice(0, 12)} ${c.committedAt} ${c.release} [${c.systems.join(",")}]`);
 
     setOutput("commits", JSON.stringify(commits));
     setOutput("count", String(commits.length));

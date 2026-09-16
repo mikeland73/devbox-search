@@ -174,6 +174,22 @@ export function selectPendingForCommits(
   return selectPending(releases, known, { limit: options.limit ?? DEFAULT_LIMIT, headCommitCount });
 }
 
+/**
+ * Backfills first, then new commits, capped at `limit`.
+ *
+ * A commit enters `commits` the moment ANY system imports, and from then on
+ * selectPendingForCommits treats it as known. Without this, a day where one
+ * system's eval failed would leave that (commit, system) unindexed forever —
+ * the opposite of the "import whatever landed, backfill the rest" design.
+ * Backfills go first because they are the oldest work and, when the archive
+ * already exists, the cheapest.
+ */
+export function withBackfill<T extends { hash: string }>(incomplete: T[], pending: T[], limit: number): T[] {
+  const seen = new Set(incomplete.map((c) => c.hash));
+  const fresh = pending.filter((c) => !seen.has(c.hash));
+  return [...incomplete, ...fresh].slice(0, limit);
+}
+
 /** The codeload tarball URL for a commit — ~45 MB, no git clone needed. */
 export function tarballUrl(hash: string): string {
   return `https://codeload.github.com/NixOS/nixpkgs/tar.gz/${hash}`;
