@@ -40,7 +40,11 @@ export function createServingClient(connectionString = requireEnv("DATABASE_URL"
  * mode.
  */
 export function createImportClient(
-  connectionString = process.env["DATABASE_URL_DIRECT"] ?? requireEnv("DATABASE_URL"),
+  // `||`, not `??`: an unset GitHub Actions secret expands to the empty string,
+  // and pg treats an empty connection string as "connect to localhost". Empty
+  // has to mean absent here or a missing secret surfaces as ECONNREFUSED
+  // 127.0.0.1:5432 instead of a named missing-variable error.
+  connectionString = process.env["DATABASE_URL_DIRECT"] || requireEnv("DATABASE_URL"),
   options: { max?: number } = {},
 ): { db: ImportDb; pool: pg.Pool } {
   const pool = new pg.Pool({

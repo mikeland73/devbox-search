@@ -5,7 +5,8 @@ export default {
   out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {
-    url: process.env["DATABASE_URL_DIRECT"] ?? process.env["DATABASE_URL"] ?? "",
+    // `||` so an empty value falls through rather than sticking (see client.ts).
+    url: process.env["DATABASE_URL_DIRECT"] || process.env["DATABASE_URL"] || "",
   },
   // Keep generated SQL readable in review — this package's migrations are
   // reviewed as pure DDL.
