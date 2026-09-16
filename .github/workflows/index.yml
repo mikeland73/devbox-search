@@ -36,7 +36,10 @@ concurrency:
 
 env:
   EVAL_REPO: mikeland73/devbox-search-indexer
-  SYSTEMS: x86_64-linux aarch64-linux x86_64-darwin aarch64-darwin
+  # No x86_64-darwin: nixpkgs 26.11 (unstable since Aug 2026) dropped it and
+  # nix-env refuses to evaluate it. Seeded x86_64-darwin data stays as-is;
+  # its ranges simply never advance past the seed head.
+  SYSTEMS: x86_64-linux aarch64-linux aarch64-darwin
 
 jobs:
   discover:
