@@ -30,12 +30,25 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 180
     steps:
-      - name: Add 16 GB swapfile
+      # The runner image changes under us: it now ships an active /swapfile,
+      # and /mnt is not guaranteed to be a separate disk (a blind 16 GB
+      # fallocate filled the root fs and killed the runner). So: pick the
+      # filesystem with the most free space, cap at 16 GB, and leave 8 GB for
+      # the nixpkgs checkout and the eval output.
+      - name: Add swapfile
         run: |
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          swapon --show; df -h / /mnt 2>/dev/null || true
+          target=$(df --output=target,avail -B1 / /mnt 2>/dev/null | tail -n +2 | sort -k2 -n | tail -1 | awk '{print $1}')
+          avail=$(df --output=avail -B1 "$target" | tail -1)
+          size=$(( avail - 8 * 1024 * 1024 * 1024 ))
+          cap=$(( 16 * 1024 * 1024 * 1024 ))
+          [ "$size" -gt "$cap" ] && size=$cap
+          if [ "$size" -lt $(( 2 * 1024 * 1024 * 1024 )) ]; then echo "not enough free space on $target for a useful swapfile"; exit 1; fi
+          echo "adding $(( size / 1024 / 1024 / 1024 )) GB swap on $target"
+          sudo fallocate -l "$size" "$target/eval-swapfile"
+          sudo chmod 600 "$target/eval-swapfile"
+          sudo mkswap "$target/eval-swapfile" > /dev/null
+          sudo swapon "$target/eval-swapfile"
           free -h
 
       - name: Install Nix
