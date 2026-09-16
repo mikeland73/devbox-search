@@ -1,14 +1,21 @@
-# Daily nixpkgs indexing: discover -> eval -> import.
+# Daily nixpkgs indexing: discover -> import -> dispatch.
 #
-# Runner sizing: private-repo `ubuntu-latest` is 2-vCPU/7 GB, which is too
-# small for a nix-env eval of all of nixpkgs. Eval therefore runs on a paid
-# 4-vCPU/16 GB larger runner plus a swapfile. If this repo ever goes public,
-# switch `eval` to the free 4-vCPU/16 GB standard runners and CI cost drops to
-# zero (darwin systems evaluate fine on Linux — this is pure evaluation).
+# The eval itself does not run here. Evaluating all of nixpkgs needs ~16 GB,
+# and a private repo's runners have 7 GB; the free 4-vCPU/16 GB runners are
+# public-repo only. So the eval lives in the public mikeland73/devbox-search-indexer
+# repo (one workflow, no application code), which archives each
+# (commit, system) eval to R2. This workflow discovers what needs indexing,
+# imports whatever the public repo has already archived, and dispatches evals
+# for what's still missing.
 #
-# The import job runs with `if: always()` so a day where one system's eval
-# fails still imports the others; commit_systems records which (commit,
-# system) pairs landed, and a later run backfills the rest.
+# Import runs BEFORE dispatch on purpose: a commit dispatched today is
+# archived in an hour or two and imported by tomorrow's run. That is a day of
+# lag in exchange for no polling, no idle runner minutes, and no cross-repo
+# callback. Everything here is minutes of standard-runner time.
+#
+# commit_systems records which (commit, system) pairs landed, so a day where
+# one system's eval failed imports the other three and picks up the fourth
+# whenever it appears.
 name: index
 
 on:
@@ -26,6 +33,13 @@ on:
 concurrency:
   group: indexer
   cancel-in-progress: false
+
+env:
+  EVAL_REPO: mikeland73/devbox-search-indexer
+  # No x86_64-darwin: nixpkgs 26.11 (unstable since Aug 2026) dropped it and
+  # nix-env refuses to evaluate it. Seeded x86_64-darwin data stays as-is;
+  # its ranges simply never advance past the seed head.
+  SYSTEMS: x86_64-linux aarch64-linux aarch64-darwin
 
 jobs:
   discover:
@@ -49,33 +63,16 @@ jobs:
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  eval:
+  import:
     needs: discover
     if: needs.discover.outputs.count != '0'
-    # github.repository_visibility, not github.event.repository.private: the
-    # event payload varies by trigger, and this job's real trigger is the cron.
-    runs-on: ${{ github.repository_visibility == 'public' && 'ubuntu-latest' || 'ubuntu-latest-4-cores' }}
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        system:
-          - x86_64-linux
-          - aarch64-linux
-          - x86_64-darwin
-          - aarch64-darwin
-        commit: ${{ fromJSON(needs.discover.outputs.commits) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      # Pending commits with at least one system not yet archived, and which.
+      missing: ${{ steps.fetch.outputs.missing }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Add swapfile
-        run: |
-          sudo fallocate -l 16G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-
-      - uses: DeterminateSystems/nix-installer-action@v16
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -84,63 +81,36 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
 
-      - name: Fetch nixpkgs
-        run: |
-          curl -fsSL "https://codeload.github.com/NixOS/nixpkgs/tar.gz/${{ matrix.commit.hash }}" -o nixpkgs.tar.gz
-          mkdir nixpkgs
-          tar -xzf nixpkgs.tar.gz --strip-components=1 -C nixpkgs
-          rm nixpkgs.tar.gz
-
-      - name: Evaluate
-        env:
-          # Nix's GC does badly with a small initial heap on a big eval.
-          GC_INITIAL_HEAP_SIZE: 6G
-        run: |
-          node packages/indexer/dist/cli.js eval \
-            --nixpkgs ./nixpkgs \
-            --system "${{ matrix.system }}" \
-            --out eval.json.gz
-
-      # The archive decouples eval from import: a failed import never forces a
-      # re-eval, and archived JSON can be replayed to backfill ranges.
-      - name: Archive eval to R2
+      # Pull whatever the public repo has archived for the pending commits
+      # into the eval-{system}-{hash}/ layout the importer reads. Absent keys
+      # are normal (not evaluated yet) and are left for dispatch.
+      - id: fetch
+        name: Fetch archived evals from R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT }}
           AWS_DEFAULT_REGION: auto
+          COMMITS: ${{ needs.discover.outputs.commits }}
         run: |
-          key="${{ matrix.system }}/$(date -u -d "${{ matrix.commit.committedAt }}" +%s)-${{ matrix.commit.hash }}.json.gz"
-          aws s3 cp eval.json.gz "s3://${{ secrets.R2_BUCKET }}/$key"
-          echo "archived $key"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: eval-${{ matrix.system }}-${{ matrix.commit.hash }}
-          path: eval.json.gz
-          retention-days: 3
-
-  import:
-    needs: [discover, eval]
-    # Import whatever succeeded: commit_systems tracks partial days and later
-    # runs backfill the missing systems.
-    if: always() && needs.discover.outputs.count != '0'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -r build
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: eval-*
-          path: evals
+          missing='[]'
+          while IFS=$'\t' read -r hash committed_at; do
+            ts=$(date -u -d "$committed_at" +%s)
+            absent='[]'
+            for system in $SYSTEMS; do
+              key="$system/$ts-$hash.json.gz"
+              dir="evals/eval-$system-$hash"
+              if aws --endpoint-url "${{ secrets.R2_ENDPOINT }}" s3 cp "s3://${{ secrets.R2_BUCKET }}/$key" "$dir/eval.json.gz" 2>/dev/null; then
+                echo "fetched $key"
+              else
+                echo "absent  $key"; absent=$(jq -c --arg s "$system" '. + [$s]' <<<"$absent")
+              fi
+            done
+            if [ "$absent" != '[]' ]; then
+              missing=$(jq -c --arg h "$hash" --arg d "$committed_at" --argjson s "$absent" '. + [{hash: $h, committedAt: $d, systems: $s}]' <<<"$missing")
+            fi
+          done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)"' <<<"$COMMITS")
+          echo "missing=$missing" >> "$GITHUB_OUTPUT"
+          echo "commits still needing eval: $(jq length <<<"$missing")"
 
       - name: Import
         env:
@@ -155,3 +125,23 @@ jobs:
         run: node packages/indexer/dist/cli.js status >> "$GITHUB_STEP_SUMMARY"
         env:
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+
+  dispatch:
+    needs: [discover, import]
+    # Dispatch even if import failed: the evals are independent of it, and a
+    # commit that is archived but not yet imported is skipped by the
+    # `missing` check anyway.
+    if: always() && needs.discover.outputs.count != '0' && needs.import.outputs.missing != '' && needs.import.outputs.missing != '[]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch evals in the public repo
+        env:
+          # Fine-grained PAT, Actions: read/write on EVAL_REPO only. The
+          # workflow's own GITHUB_TOKEN cannot dispatch across repos.
+          GH_TOKEN: ${{ secrets.INDEXER_DISPATCH_TOKEN }}
+          MISSING: ${{ needs.import.outputs.missing }}
+        run: |
+          while IFS=$'\t' read -r hash committed_at systems; do
+            gh workflow run eval.yml -R "$EVAL_REPO" -f "commit=$hash" -f "committed_at=$committed_at" -f "systems=$systems"
+            echo "dispatched $hash ($committed_at) $systems" | tee -a "$GITHUB_STEP_SUMMARY"
+          done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | tojson)"' <<<"$MISSING")

@@ -7,7 +7,7 @@
  *   cli.js status                 a markdown summary of the index
  */
 
-import { appendFileSync, createReadStream, readdirSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createGunzip } from "node:zlib";
 import { text } from "node:stream/consumers";
@@ -86,7 +86,10 @@ async function cmdImport(): Promise<void> {
   const dir = requireArg("dir");
   const entries: Array<{ path: string; system: string; commit: string }> = [];
 
-  for (const name of readdirSync(dir)) {
+  // download-artifact does not create --dir when no artifact matched (every
+  // eval failed, or was cancelled). That is the "import whatever succeeded"
+  // case the workflow runs this job for, so it must be a no-op, not ENOENT.
+  for (const name of existsSync(dir) ? readdirSync(dir) : []) {
     const m = /^eval-([0-9a-z_-]+)-([0-9a-f]{40})$/.exec(name);
     if (m === null) continue;
     const inner = join(dir, name);

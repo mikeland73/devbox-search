@@ -19,6 +19,7 @@
 
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   char,
   customType,
@@ -129,6 +130,11 @@ export const packages = pgTable(
  * (e.g. "2024-01-05", "1.1.1w"); they exist to support npm-style range
  * constraints (sanctioned change #1). Unparseable versions fall back to
  * prefix-with-boundary matching.
+ *
+ * They are bigint, not integer: nixpkgs has ~100 strict-semver versions with a
+ * date-stamped component ("3.1.20220119140128") that overflows int4. The
+ * longest in the data is 14 digits, and parseSemver already rejects anything
+ * past Number.MAX_SAFE_INTEGER, so int8 can never overflow.
  */
 export const versions = pgTable(
   "versions",
@@ -140,9 +146,9 @@ export const versions = pgTable(
     version: text("version").notNull(),
     sortKey: bytea("sort_key").notNull(),
     prerelease: boolean("prerelease").notNull().default(false),
-    semverMajor: integer("semver_major"),
-    semverMinor: integer("semver_minor"),
-    semverPatch: integer("semver_patch"),
+    semverMajor: bigint("semver_major", { mode: "number" }),
+    semverMinor: bigint("semver_minor", { mode: "number" }),
+    semverPatch: bigint("semver_patch", { mode: "number" }),
     semverPre: text("semver_pre"),
   },
   (t) => [

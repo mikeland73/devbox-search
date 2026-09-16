@@ -15,11 +15,25 @@ code: accounts, credentials, decisions, and the order to do them in.
   `DEVBOX_SEARCH_HOST` (or a later CLI release). API byte-compatibility still
   matters — people will point current CLIs at the new host — so the shadow-diff
   gate stays exactly as strict.
-- **Runners:** use [Blacksmith](https://blacksmith.sh) for the eval job rather
-  than GitHub larger runners. GitHub's larger runners require a Team or
-  Enterprise plan, which a personal private repo doesn't have; Blacksmith
-  attaches as a GitHub App, works on private repos, and costs roughly half.
-  See [Phase 0](#phase-0--unblock-do-these-first) for what to verify.
+- **Runners (revised 2026-09-16):** neither of the original plans is available
+  to a personal account. GitHub's larger runners (`ubuntu-latest-4-cores`)
+  need a Team/Enterprise org — on a personal private repo the jobs **queue
+  forever** rather than failing, so a stuck `queued` eval is this, not a
+  capacity blip. Blacksmith also doesn't support personal accounts. The
+  order of preference now:
+  1. ~~**Standard free `ubuntu-latest` (2 vCPU / 7 GB) plus swap**~~ —
+     **tested 2026-09-16, does not fit** (see 0.2). And it wouldn't have been
+     free anyway: 4 evals/day blows past the Pro plan's 3,000 included minutes.
+  2. **Make the repo public** — free 4-vCPU/16 GB runners, unlimited minutes.
+     `index.yml` already switches on `repository_visibility`. History was
+     scanned 2026-09-16 and is clean; the Claude workflows are gated to the
+     owner so strangers can't spend the OAuth token. Downside: the half-built
+     migration is visible.
+  3. **Vercel Sandbox** (Pro: 8 vCPU / 16 GB, 24 h sessions, ~$0.47 per
+     eval-hour → ~$36–92/mo net of the $20 credit). Fits only if peak RSS is
+     comfortably under 16 GB with no swap. Would need the eval to run detached
+     and `import` to read from R2 instead of workflow artifacts.
+  4. **Self-hosted runner** (Hetzner ~€6/mo) — the private-repo fallback.
 
 ---
 
@@ -95,43 +109,48 @@ credentials for a local seed — don't copy them out of the Neon console.
 ## Phase 0 — unblock (do these first)
 
 These are independent of each other and of PR review. Everything else waits on
-them. 0.3 and 0.4 are **done**; only Blacksmith (0.1, 0.2) is outstanding, and
-it gates nothing before Phase 4.
+them. 0.3 and 0.4 are **done**; the runner question (0.1, 0.2) is the only
+thing outstanding and it blocks Phase 4's first real eval.
 
-### 0.1 Set up Blacksmith
+### 0.1 Pick a runner — ~~Blacksmith~~ (not available to personal accounts)
 
-- [ ] Install the Blacksmith GitHub App on the repo
-- [ ] Confirm the current runner labels and specs at blacksmith.sh — they
-      change, so don't trust a label copied from here. Expect the form
-      `blacksmith-4vcpu-ubuntu-2204` / `-8vcpu-`.
-- [ ] Confirm **RAM** on the tier you pick. The eval needs ~16 GB; Blacksmith
-      generally gives more RAM per vCPU than GitHub, so a 4-vCPU tier is the
-      starting point and 8-vCPU is the fallback.
-- [ ] Confirm per-minute price to sanity-check the cost table below.
+Blacksmith is out (no personal-account support, confirmed 2026-09-16), as are
+GitHub larger runners. See the revised runner decision at the top. What to do
+depends on 0.2:
 
-Then update `.github/workflows/index.yml` on `main` (line 57, currently an
-`ubuntu-latest` / `ubuntu-latest-4-cores` visibility expression):
+- [ ] If the eval **fits on `ubuntu-latest` + swap**: change `index.yml`'s
+      `eval.runs-on` to plain `ubuntu-latest` and stay private. Expect each
+      eval to be slow (2 vCPU, heavy swapping) — check it lands inside the
+      180-minute job timeout with margin.
+- [ ] If it doesn't: make the repo public (`gh repo edit --visibility public`
+      **after** PR #12 merges, so the owner-gated Claude workflows are live on
+      `main` first). `index.yml` needs no change.
+- [ ] Only if neither works: Vercel Sandbox or a Hetzner self-hosted runner.
 
-```yaml
-  eval:
-    runs-on: blacksmith-4vcpu-ubuntu-2204   # was: the ubuntu-latest-4-cores expression
-```
-
-Keep the swapfile step. It's ~10 seconds and it's cheap insurance against an
-eval that grows past RAM.
+The swapfile step now sizes itself from free space; don't hardcode a path or
+size again — see "Things the runner image taught us" below.
 
 ### 0.2 Prove the eval fits in memory
 
-`eval-experiment.yml` is already on `main`, so its `workflow_dispatch` is live
-in the Actions tab and takes the runner label as an input.
+`eval-experiment.yml` takes the runner label as a `workflow_dispatch` input.
+Dispatch it from the branch that has the adaptive swapfile step (PR #12, or
+`main` once merged).
 
-- [ ] Run **eval-experiment** from the Actions tab with a recent nixpkgs commit
-      hash and the Blacksmith label
-- [ ] Record peak RSS, wall time, and output size from the job log
+- [x] Run **eval-experiment** on `ubuntu-latest` — run 35136891482,
+      `x86_64-linux` at `6b5e5b7a` (2026-09-16); earlier attempts died on the
+      swapfile step, see below
+- [x] Result: **does not fit.** Runner had 7.8 GB RAM, 2 vCPU, 14 GB free
+      disk → 8.4 GB swap total. `nix-env` ran 36 min, then GitHub killed the
+      VM (`exit 143`, "runner has received a shutdown signal") — the
+      swap-thrash signature, not the 180-min timeout. Peak RSS unrecorded
+      but >7.8 GB and not sustainable on 8 GB of swap. Option 1 is out.
+- [ ] Decide 0.1 from what's left: public repo (16 GB + swap) is the only
+      free option; Vercel Sandbox's 16 GB with no swap is risky given the
+      eval clearly needs well over 8 GB.
 
-This gates the whole indexer design. If it OOMs, the ordered fallbacks are:
-`nix-eval-jobs --workers 2 --max-memory-size 6000` (needs an output adapter),
-a bigger Blacksmith tier, then a self-hosted runner (Hetzner ~€6/mo).
+If it OOMs even with swap, the ordered fallbacks are: make the repo public
+(16 GB + swap), `nix-eval-jobs --workers 2 --max-memory-size 6000` (needs an
+output adapter), Vercel Sandbox, then a self-hosted runner.
 
 ### 0.3 Create the Neon project — **done**
 
@@ -209,8 +228,8 @@ All five PRs are merged, so there's nothing left to retarget.
 ## Phase 2 — seed and validate
 
 - [x] Review **PR #5** (seed)
-- [ ] Temporarily bump staging compute (the seed uploads ~1.5 GB)
-- [ ] Run the seed **locally**, not in CI:
+- [x] ~~Temporarily bump staging compute~~ — not needed: the staging seed ran in ~10 min on default compute (2026-09-16)
+- [x] Run the seed **locally**, not in CI (staging, 2026-09-16; needed migration 0001 first — `semver_*` widened to bigint):
 
 ```sh
 pnpm --filter "@devbox-search/indexer..." build
@@ -219,7 +238,7 @@ DATABASE_URL_DIRECT=<staging-direct> \
   ~/devbox-search-data/nixpkgs-compact-2026-08-13.db
 ```
 
-- [ ] Check `seed-report.txt`. Row counts are hard assertions and must match
+- [x] Check `seed-report.txt`. Row counts are hard assertions and must match
       exactly:
 
   | table | expected |
@@ -229,13 +248,13 @@ DATABASE_URL_DIRECT=<staging-direct> \
   | packages | 248,524 |
   | commits | 2,751 |
 
-- [ ] Spot-check the ordering divergences. These are **expected** (sanctioned
+- [x] Spot-check the ordering divergences. These are **expected** (sanctioned
       change #4 replaced a non-transitive comparator) and already enumerated in
       `~/devbox-search-data/ordering-report.txt`: 764,913 pairs across 10,004
       packages, and **0** prerelease divergences. You're sanity-checking that
       the new order is right where it differs, not reading 765k lines.
-- [ ] Drop staging compute back down
-- [ ] Merge PR #5
+- [x] ~~Drop staging compute back down~~ — n/a, never bumped
+- [x] Merge PR #5
 
 ---
 
@@ -285,8 +304,8 @@ required for it to be useful.
 
 ## Phase 4 — indexer
 
-- [ ] Create the Cloudflare R2 bucket (free tier ≈ 3–5 years of eval archives)
-- [ ] Add repo secrets:
+- [x] Create the Cloudflare R2 bucket (free tier ≈ 3–5 years of eval archives) — `devbox-search-evals`, location hint `enam`
+- [x] Add repo secrets:
 
   | secret | used by |
   |---|---|
@@ -301,9 +320,13 @@ required for it to be useful.
   phase. Pull it with `vercel env pull` rather than copying it from the
   console.
 
-- [ ] Apply the Blacksmith `runs-on` change from 0.1
+- [ ] Apply the `runs-on` decision from 0.1
 - [x] Merge PR #7
-- [ ] Point the workflow at **staging** and soak for ~1 week
+- [x] Point the workflow at **staging** — `DATABASE_URL_DIRECT` is the
+      staging direct URL (set 2026-09-16). `discover` now works end to end:
+      run 35133999914 picked `6b5e5b7a` (2026-08-13), the first release after
+      the seed head, exactly as designed. The eval jobs are what's blocked.
+- [ ] Soak for ~1 week once eval runs
 
   Daily sanity checks:
   - new commits appear and `commit_systems` fills in for all 4 systems
@@ -324,6 +347,60 @@ required for it to be useful.
 - [ ] Verify TLS and that `/readyz` returns `ok`
 - [ ] Re-run the shadow diff against the real domain
 - [ ] Announce the `DEVBOX_SEARCH_HOST` value for anyone who wants to use it
+
+---
+
+## Things learned the hard way (2026-09-16)
+
+Debugging the first 35 failed `index` runs surfaced these. Each one either
+produced a misleading error or no error at all.
+
+**The workflow, in the order things failed:**
+
+- **Missing secrets look like a local Postgres.** An unset GitHub secret
+  expands to `""`, and `pg` treats an empty connection string as
+  `localhost:5432` — so a missing `DATABASE_URL_DIRECT` surfaced as
+  `ECONNREFUSED 127.0.0.1:5432` for a month. Fixed in #11 (`||` not `??`);
+  it now says `missing required environment variable`.
+- **`discover` on an empty database walks to the beginning of time.** With no
+  imported commits, `headCommitCount` is 0 and it picks the *oldest* release
+  in the nix-releases bucket (a 2017 commit whose 7-char hash GitHub can't
+  resolve → `422`). The seed must run first. Optional hardening: bail with
+  "no commits in database — run the seed first".
+- **`import` with zero artifacts crashed.** `download-artifact` doesn't
+  create the target dir when nothing matched, and `readdirSync` threw
+  `ENOENT` — defeating the `if: always()` "import whatever succeeded" design.
+  Fixed in PR #12: missing dir == no archives.
+- **Jobs on an unavailable runner label queue forever.** No error, no
+  timeout. Same symptom for a $0 Actions budget. If `eval` sits in `queued`
+  for more than a couple of minutes, it's one of those two.
+- **The runner image changes.** `ubuntu-latest` now ships an active 4 GB
+  `/swapfile` (`fallocate: Text file busy`), and `/mnt` isn't a separate
+  disk, so a blind 16 GB fallocate filled `/` and killed the runner with
+  `No space left on device` from its *own* diag log. The swapfile step now
+  sizes itself from `df`.
+
+**The seed:**
+
+- **`semver_major/minor/patch` had to be `bigint`.** nixpkgs has 99
+  strict-semver versions with a date-stamped component (`3.1.20220119140128`,
+  widest 14 digits) that overflow int4; `parseSemver` accepts up to 2^53.
+  Migration `0001_semver_bigint`. **Prod needs `db migrate` before its seed.**
+- **The PGlite test suites had `0000_init.sql` hardcoded**, so a second
+  migration would never have been tested. They now apply the journal.
+- The staging seed took ~10 minutes on default Neon compute. The "bump
+  compute" step is unnecessary.
+
+**Local tooling:**
+
+- `aws` CLI older than 2.13 silently ignores `AWS_ENDPOINT_URL` and sends R2
+  requests to real AWS S3, which then reports `InvalidAccessKeyId`. Pass
+  `--endpoint-url` explicitly when testing R2 locally. The runner's CLI is
+  current, so `index.yml` is fine.
+- A shell profile that exports `AWS_REGION` overrides `AWS_DEFAULT_REGION`;
+  R2 needs `auto`.
+- `vercel link` drops a `.env.local` (with real credentials) in the repo root.
+  Delete it.
 
 ---
 
@@ -348,11 +425,18 @@ required for it to be useful.
 |---|---|
 | Neon Launch | ~$5–22 (storage ~$1.40, compute varies with CDN hit rate) — billed through Vercel, not a separate Neon account |
 | Vercel | $0 incremental (already paid) |
-| Blacksmith (eval) | ~$30–60 — **verify current pricing**; roughly half GitHub's larger runners |
+| Eval runners | depends on 0.1: **$0** on `ubuntu-latest` if it fits inside the Pro plan's 3,000 included minutes (it won't — 4 evals × ~2 h daily ≈ 14,000 min → ~$90/mo at $0.008/min), **$0** if the repo is public, ~$36–92 on Vercel Sandbox, ~€6 self-hosted |
 | GitHub standard runners (discover/import) | ~$5–15, largely inside the Pro plan's free minutes |
 | R2 eval archive | $0 (free 10 GB) |
-| **Total** | **~$40–100** |
+| **Total** | **~$5–22 public; ~$45–115 private** |
 
-Making the repo public would drop the runner lines to $0 (public repos get free
-4-vCPU/16-GB runners), taking the total to ~$5–22. Worth revisiting once the
-migration is done and there's nothing sensitive in the history.
+The GitHub Actions **budget** matters as much as the plan: a $0 Actions budget
+with "stop usage" on silently prevents any paid-minute job from being
+scheduled — it queues forever, no error. It was $0 until 2026-09-16 (now $50).
+Already-queued jobs are not re-evaluated when the budget changes; cancel and
+re-trigger.
+
+Making the repo public is the cheapest path by a wide margin. History was
+scanned clean on 2026-09-16 (all remote branches; the only hits were in local
+Conductor checkpoint refs that never reach GitHub). Once PR #12 merges, the
+Claude workflows are owner-gated and it's safe to flip.
