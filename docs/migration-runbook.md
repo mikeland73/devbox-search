@@ -209,8 +209,8 @@ All five PRs are merged, so there's nothing left to retarget.
 ## Phase 2 — seed and validate
 
 - [x] Review **PR #5** (seed)
-- [ ] Temporarily bump staging compute (the seed uploads ~1.5 GB)
-- [ ] Run the seed **locally**, not in CI:
+- [x] ~~Temporarily bump staging compute~~ — not needed: the staging seed ran in ~10 min on default compute (2026-09-16)
+- [x] Run the seed **locally**, not in CI (staging, 2026-09-16; needed migration 0001 first — `semver_*` widened to bigint):
 
 ```sh
 pnpm --filter "@devbox-search/indexer..." build
@@ -219,7 +219,7 @@ DATABASE_URL_DIRECT=<staging-direct> \
   ~/devbox-search-data/nixpkgs-compact-2026-08-13.db
 ```
 
-- [ ] Check `seed-report.txt`. Row counts are hard assertions and must match
+- [x] Check `seed-report.txt`. Row counts are hard assertions and must match
       exactly:
 
   | table | expected |
@@ -229,13 +229,13 @@ DATABASE_URL_DIRECT=<staging-direct> \
   | packages | 248,524 |
   | commits | 2,751 |
 
-- [ ] Spot-check the ordering divergences. These are **expected** (sanctioned
+- [x] Spot-check the ordering divergences. These are **expected** (sanctioned
       change #4 replaced a non-transitive comparator) and already enumerated in
       `~/devbox-search-data/ordering-report.txt`: 764,913 pairs across 10,004
       packages, and **0** prerelease divergences. You're sanity-checking that
       the new order is right where it differs, not reading 765k lines.
-- [ ] Drop staging compute back down
-- [ ] Merge PR #5
+- [x] ~~Drop staging compute back down~~ — n/a, never bumped
+- [x] Merge PR #5
 
 ---
 
