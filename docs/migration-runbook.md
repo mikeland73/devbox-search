@@ -285,8 +285,8 @@ required for it to be useful.
 
 ## Phase 4 — indexer
 
-- [ ] Create the Cloudflare R2 bucket (free tier ≈ 3–5 years of eval archives)
-- [ ] Add repo secrets:
+- [x] Create the Cloudflare R2 bucket (free tier ≈ 3–5 years of eval archives) — `devbox-search-evals`, location hint `enam`
+- [x] Add repo secrets:
 
   | secret | used by |
   |---|---|
