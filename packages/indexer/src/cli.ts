@@ -7,14 +7,13 @@
  *   cli.js status                 a markdown summary of the index
  */
 
-import { appendFileSync, createReadStream, existsSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
-import { createGunzip } from "node:zlib";
-import { text } from "node:stream/consumers";
 import { createImportClient } from "@devbox-search/db";
 import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits } from "./discover.js";
 import { evaluate } from "./evaluate.js";
 import { importEval } from "./import.js";
+import { readEvalArchive } from "./readEval.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf("--" + name);
@@ -122,7 +121,7 @@ async function cmdImport(): Promise<void> {
   for (const entry of entries) {
     console.log(`\n=== ${basename(entry.path)} (${entry.system}) ===`);
     try {
-      const json = JSON.parse(await text(createReadStream(entry.path).pipe(createGunzip()))) as unknown;
+      const json = await readEvalArchive(entry.path);
       await importEval({
         json,
         commitHash: entry.commit,
