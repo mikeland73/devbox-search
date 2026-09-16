@@ -8,23 +8,17 @@
  * open/closed presence ranges.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { sortKey } from "@devbox-search/core";
-import { MIGRATIONS_FOLDER } from "./migrate.js";
+import { migrationStatements } from "./migrate.js";
 
 let db: PGlite;
 
 beforeAll(async () => {
   db = await PGlite.create({ extensions: { pg_trgm } });
-  const sql = readFileSync(join(MIGRATIONS_FOLDER, "0000_init.sql"), "utf8");
-  for (const statement of sql.split("--> statement-breakpoint")) {
-    const trimmed = statement.trim();
-    if (trimmed !== "") await db.exec(trimmed);
-  }
+  for (const statement of migrationStatements()) await db.exec(statement);
 }, 120_000);
 
 afterAll(async () => {
@@ -191,6 +185,22 @@ describe("schema behavior", () => {
   test("case-insensitive name lookup uses the lower(name) index", async () => {
     const found = await rows<{ name: string }>(`SELECT name FROM packages WHERE lower(name) = lower('PyThOn')`);
     expect(found.map((r) => r.name)).toEqual(["python"]);
+  });
+
+  test("semver components accept date-stamped values wider than int4", async () => {
+    // nixpkgs has ~100 strict-semver versions like 3.1.20220119140128; the
+    // seed COPY failed on the first of them while the columns were integer.
+    await db.exec(`INSERT INTO packages (name) VALUES ('semver-wide')`);
+    const [pkg] = await rows<{ id: number }>(`SELECT id FROM packages WHERE name = 'semver-wide'`);
+    await db.query(
+      `INSERT INTO versions (package_id, version, sort_key, semver_major, semver_minor, semver_patch)
+       VALUES ($1, '3.1.20220119140128', '\\x00', 3, 1, 20220119140128)`,
+      [pkg!.id],
+    );
+    const [row] = await rows<{ patch: string }>(
+      `SELECT semver_patch::text AS patch FROM versions WHERE version = '3.1.20220119140128'`,
+    );
+    expect(row?.patch).toBe("20220119140128");
   });
 
   test("cascade: deleting a package removes its versions and variants", async () => {

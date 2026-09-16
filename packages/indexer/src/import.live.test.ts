@@ -15,27 +15,17 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { canonicalName, contentHash, decodeEvalJson, metaHash } from "@devbox-search/core";
+import { migrationStatements } from "@devbox-search/db";
 import { packageKey, toVersionRow } from "./seedTransform.js";
 import * as SQL from "./importSql.js";
-
-const MIGRATION = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../../db/drizzle/0000_init.sql",
-);
 
 let db: PGlite;
 
 beforeEach(async () => {
   db = await PGlite.create({ extensions: { pg_trgm } });
-  for (const statement of readFileSync(MIGRATION, "utf8").split("--> statement-breakpoint")) {
-    const trimmed = statement.trim();
-    if (trimmed !== "") await db.exec(trimmed);
-  }
+  for (const statement of migrationStatements()) await db.exec(statement);
 }, 120_000);
 
 afterEach(async () => {
