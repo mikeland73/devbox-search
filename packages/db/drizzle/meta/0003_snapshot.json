@@ -1,6 +1,6 @@
 {
-  "id": "ed8d8a63-fcde-4627-8f87-db371249408e",
-  "prevId": "4ea3ddb9-548a-4682-816a-119f75fd88e8",
+  "id": "e71ccb3c-7b81-41ef-860b-1b737527cc5c",
+  "prevId": "ed8d8a63-fcde-4627-8f87-db371249408e",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -26,6 +26,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "nix_version": {
+          "name": "nix_version",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},

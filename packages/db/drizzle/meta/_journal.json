@@ -19,8 +19,15 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1789662061659,
-      "tag": "0002_commit_systems_nix_version",
+      "when": 1789661978547,
+      "tag": "0002_variants_store_hash_check",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789662865126,
+      "tag": "0003_commit_systems_nix_version",
       "breakpoints": true
     }
   ]

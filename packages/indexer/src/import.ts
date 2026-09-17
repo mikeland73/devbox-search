@@ -71,23 +71,8 @@ export async function importEval(options: ImportOptions): Promise<ImportResult> 
     // ---------------------------------------------------------------------
     // 1. Parse client-side (same decoder + hashers as the seed)
     // ---------------------------------------------------------------------
-    const decoded = decodeEvalJson(options.json, options.commitHash, options.committedAt);
-    log(`decoded ${decoded.packages.length} attribute paths for ${options.system}`);
-
-    const rows = decoded.packages
-      // An eval is per-system, but Hydra JSON can carry a system field; trust
-      // the requested system so a mislabelled row can't corrupt another one.
-      .map((pkg) => ({ ...pkg, system: options.system }))
-      .map((pkg) => ({
-        pkg,
-        name: canonicalName(pkg.attrPath),
-        version: pkg.storeVersion,
-        metaHash: metaHash(pkg),
-        contentHash: contentHash(pkg),
-      }))
-      // Rows without a version can't be addressed by the API and were never
-      // stored by the old service either.
-      .filter((r) => r.version !== "");
+    const rows = evalRows(options.json, options.commitHash, options.committedAt, options.system);
+    log(`decoded ${rows.length} rows for ${options.system}`);
 
     await client.query("BEGIN");
     await client.query(SQL.LOCK);
@@ -219,6 +204,8 @@ export async function importEval(options: ImportOptions): Promise<ImportResult> 
     );
     const changedCount = changed.rowCount ?? 0;
     log(`variants: ${changedCount} new or changed (of ${rows.length})`);
+    const warning = changeRatioWarning(changedCount, rows.length, prevSeq);
+    if (warning !== null) log(`WARNING: ${warning}`);
 
     // ---------------------------------------------------------------------
     // 3c. Upload full rows for the changed set only
@@ -320,10 +307,23 @@ function emptyResult(commitSeq: number, skipped: boolean): ImportResult {
   };
 }
 
-/** Exported for tests: the rows an eval contributes, before any DB contact. */
+/**
+ * The rows an eval contributes, before any DB contact: decoded, hashed, and
+ * checked. Throws rather than returning a row with no store hash.
+ *
+ * decodeEvalJson already drops nix-env stubs (listed but unevaluable: no
+ * outputs, no meta). This is the second line of defence at the importer
+ * boundary, because the failure mode is quiet and expensive: the one time
+ * stubs got through they became ~75k phantom variants per commit and ~11k
+ * fake packages with broken=false, cleaned up by hand. A future decoder
+ * change, another eval producer or a hand-run import must fail here, not
+ * write that again. The variants CHECK constraint is the third line.
+ */
 export function evalRows(json: unknown, commitHash: string, committedAt: Date, system: string) {
   const decoded = decodeEvalJson(json, commitHash, committedAt);
-  return decoded.packages
+  const rows = decoded.packages
+    // An eval is per-system, but Hydra JSON can carry a system field; trust
+    // the requested system so a mislabelled row can't corrupt another one.
     .map((pkg: EvalPackage) => ({ ...pkg, system }))
     .map((pkg: EvalPackage) => ({
       pkg,
@@ -332,5 +332,49 @@ export function evalRows(json: unknown, commitHash: string, committedAt: Date, s
       metaHash: metaHash(pkg),
       contentHash: contentHash(pkg),
     }))
+    // Rows without a version can't be addressed by the API and were never
+    // stored by the old service either.
     .filter((r) => r.version !== "");
+
+  const stubs = rows.filter((r) => r.pkg.storeHash === "");
+  if (stubs.length > 0) {
+    const sample = stubs
+      .slice(0, 5)
+      .map((r) => r.pkg.attrPath)
+      .join(", ");
+    throw new Error(
+      `refusing to import ${commitHash.slice(0, 7)}/${system}: ${stubs.length} of ${rows.length} rows ` +
+        `have no store hash (e.g. ${sample}). These are nix-env stubs that decodeEvalJson should have ` +
+        `dropped; importing them would create phantom packages.`,
+    );
+  }
+  return rows;
+}
+
+/**
+ * Above this share of new-or-changed variants, something is probably wrong
+ * with the eval rather than with nixpkgs. A normal day is ~1–1.5%.
+ */
+export const CHANGE_RATIO_WARN_THRESHOLD = 0.2;
+
+/**
+ * A loud-log message when an import changes an implausible share of its
+ * rows, or null when the numbers look like a normal day.
+ *
+ * Only a warning, not a failure: a staging-next merge legitimately rebuilds
+ * nearly every package (new store hashes → new content hashes), and blocking
+ * the index on that would be wrong. The stub guard above is the hard stop
+ * for the known bad case; this catches the ones we haven't met yet, in the
+ * CI log. Skipped when there is no previous import for the system, since
+ * the first one is 100% new by definition.
+ */
+export function changeRatioWarning(changed: number, scanned: number, prevSeq: number | null): string | null {
+  if (prevSeq === null || scanned === 0) return null;
+  const ratio = changed / scanned;
+  if (ratio <= CHANGE_RATIO_WARN_THRESHOLD) return null;
+  return (
+    `${changed} of ${scanned} variants (${(ratio * 100).toFixed(1)}%) are new or changed; ` +
+    `a normal day is ~1–1.5%. Expected after a mass rebuild (staging-next), ` +
+    `otherwise the eval or decoder is probably wrong — inspect this import before trusting it.`
+  );
 }
