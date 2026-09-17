@@ -136,9 +136,9 @@ hard way" below.
 
 ### 0.2 Prove the eval fits in memory — **done**
 
-The probe workflow (`eval-experiment.yml`) was removed (#18, PR #32) once its numbers
-were recorded here; on this private repo it could only ever land on the
-runner where the eval doesn't fit. A one-off manual eval today is `eval.yml`
+The probe workflow (`eval-experiment.yml`) is deleted by PR #32 (#18) now
+that its numbers are recorded here; on this private repo it could only ever
+land on the runner where the eval doesn't fit. A one-off manual eval today is `eval.yml`
 in the public repo, dispatched with a single system.
 
 - [x] Run **eval-experiment** on `ubuntu-latest` — run 35136891482,
@@ -351,10 +351,10 @@ required for it to be useful.
       the seed head, exactly as designed.
 - [x] **The daily loop is live on staging** (2026-09-16). seq 2752
       (`6b5e5b7a`) imported on all three systems from public-repo archives.
-- [x] **Backlog cleared** (2026-09-17, #20): the seed ended 2026-08-12 and 42
-      releases had accumulated. Seven manual runs at `limit=10–15` took
-      staging from seq 2753 to **2795 = `c7def046`** (nixpkgs-26.11pre1073483),
-      the nixpkgs-unstable head at the time. All 42 evals succeeded; run 2
+- [x] **Backlog cleared** (2026-09-17, #20): the seed ended 2026-08-12 and
+      ~40 releases had accumulated. Seven manual runs at `limit=10–15` took
+      staging from seq 2752 to **2795 = `c7def046`** (nixpkgs-26.11pre1073483),
+      the nixpkgs-unstable head at the time. Every eval succeeded; run 2
       surfaced #30 (`stage_versions` still int4). The cron's `limit=4` is
       plenty from here.
 - [ ] Soak for ~1 week (started 2026-09-17)
@@ -366,10 +366,10 @@ required for it to be useful.
     workflow pins `nix-package-url`). A change here without a deliberate
     bump in `devbox-search-indexer` is the first suspect for odd counts (#19)
   - ranges open and close in plausible numbers
-  - changed variants per commit is **~1,500–1,800 per system** (about 1–1.5%
-    of packages). ~75k per commit means stubs got through (#19/#21);
-    millions would mean content hashes disagree with the seed, i.e. the
-    importer and seed are hashing differently
+  - changed variants per commit is **~1,500–1,800 per system**. ~75k per
+    commit means stubs got through (#19/#21); millions would mean content
+    hashes disagree with the seed, i.e. the importer and seed are hashing
+    differently
 
 - [ ] Switch to **prod** and keep shadow-diffing daily
 
