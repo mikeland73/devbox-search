@@ -101,6 +101,29 @@ describe("searchByPhrase candidate tiers", () => {
     expect(uniqueNames(latest)).toEqual(prefixed.slice(0, 50));
   }, 60_000);
 
+  test("a package straddling both tiers is one result, not two", async () => {
+    // The tiers are grouped separately, so a package whose name matches
+    // neither way but whose attribute paths split across the tiers — one a
+    // prefix match, one only trigram-similar — would surface once from each
+    // without a final grouping on package. The old single GROUP BY could not
+    // produce this; the response builders assume one hit per package.
+    await seedPackage(t.db, {
+      name: "cpython",
+      versions: [
+        { version: "3.12.0", attrPath: "python312" },
+        { version: "3.11.0", attrPath: "ipython3" },
+      ],
+    });
+    await seedPackage(t.db, { name: "python3-full", versions: [{ version: "3.12.0" }] });
+
+    const latest = await search({ phrase: "python3", version: "latest" });
+    expect(latest.map((p) => p.name)).toEqual(["python3-full", "cpython"]);
+
+    const all = await search({ phrase: "python3" });
+    expect(uniqueNames(all)).toEqual(["python3-full", "cpython"]);
+    expect(all.filter((p) => p.name === "cpython")).toHaveLength(2);
+  });
+
   test("a full prefix tier still yields to a better prefix match seeded last", async () => {
     await seedPrefixed("py", 50);
     await seedPackage(t.db, { name: "py", versions: [{ version: "1.0.0" }] });

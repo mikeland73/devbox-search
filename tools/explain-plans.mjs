@@ -59,7 +59,11 @@ fuzzy AS (${tier(`(SELECT count(*) FROM prefix) < 50
     AND (search_terms.name % $1 OR search_terms.attr_path % $1)
     AND NOT ${PREFIX_MATCH}`)})
 SELECT package_id
-FROM (SELECT * FROM prefix UNION ALL SELECT * FROM fuzzy) AS tiers
+FROM (
+  SELECT package_id, max(rank) AS rank, min(name) AS name
+  FROM (SELECT * FROM prefix UNION ALL SELECT * FROM fuzzy) AS tiers
+  GROUP BY package_id
+) AS ranked
 ORDER BY rank DESC, name
 LIMIT 50`;
 

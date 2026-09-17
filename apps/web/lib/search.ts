@@ -439,8 +439,17 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
       (SELECT count(*) FROM prefix) < ${PHRASE_LIMIT}
       AND (search_terms.name % ${phrase} OR search_terms.attr_path % ${phrase})
       AND NOT ${prefixMatch}`)})
+    -- The tiers are grouped separately, and a package with several attribute
+    -- paths can have one in each (name not a prefix match; one attr_path a
+    -- prefix match, another only similar). Group once more so a package is
+    -- one hit, as the old single GROUP BY guaranteed; name is constant per
+    -- package. At most 2 x PHRASE_LIMIT rows reach this point.
     SELECT package_id
-    FROM (SELECT * FROM prefix UNION ALL SELECT * FROM fuzzy) AS tiers
+    FROM (
+      SELECT package_id, max(rank) AS rank, min(name) AS name
+      FROM (SELECT * FROM prefix UNION ALL SELECT * FROM fuzzy) AS tiers
+      GROUP BY package_id
+    ) AS ranked
     -- Best score first; ties by name, as the old "ORDER BY rank, pkg.name".
     ORDER BY rank DESC, name
     LIMIT ${PHRASE_LIMIT}`);
