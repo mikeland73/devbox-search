@@ -79,6 +79,17 @@ describe("schema invariants", () => {
     }
   });
 
+  test("variants.store_hash is non-empty and has no default (a stub is not a package)", () => {
+    const column = getTableConfig(variants).columns.find((c) => c.name === "store_hash")!;
+    expect(column.notNull).toBe(true);
+    expect(column.hasDefault).toBe(false);
+    const checks = getTableConfig(variants).checks.map((c) => c.name);
+    expect(checks).toEqual(["variants_store_hash_nonempty"]);
+    const migration = readFileSync(join(MIGRATIONS_FOLDER, "0002_variants_store_hash_check.sql"), "utf8");
+    expect(migration).toContain(`ALTER COLUMN "store_hash" DROP DEFAULT`);
+    expect(migration).toContain(`CHECK ("variants"."store_hash" <> '')`);
+  });
+
   test("meta is content-addressed by a unique hash", () => {
     const cfg = getTableConfig(meta);
     expect(cfg.columns.find((c) => c.name === "hash")!.isUnique).toBe(true);

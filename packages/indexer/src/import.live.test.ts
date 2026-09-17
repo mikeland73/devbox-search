@@ -16,8 +16,8 @@
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { canonicalName, contentHash, decodeEvalJson, metaHash } from "@devbox-search/core";
 import { migrationStatements } from "@devbox-search/db";
+import { evalRows } from "./import.js";
 import { packageKey, toVersionRow } from "./seedTransform.js";
 import * as SQL from "./importSql.js";
 
@@ -73,20 +73,11 @@ function toParam(value: unknown): unknown {
 
 /**
  * Runs the importer's SQL against PGlite: the statements are importSql.ts
- * verbatim, in importEval's order, with COPY replaced by `stage`.
+ * verbatim, in importEval's order, with COPY replaced by `stage`. Row
+ * derivation is importEval's own evalRows, so its guards run here too.
  */
 async function runImport(json: unknown, commitHash: string, committedAt: Date, system: string) {
-  const decoded = decodeEvalJson(json, commitHash, committedAt);
-  const rows = decoded.packages
-    .map((pkg) => ({ ...pkg, system }))
-    .map((pkg) => ({
-      pkg,
-      name: canonicalName(pkg.attrPath),
-      version: pkg.storeVersion,
-      metaHash: metaHash(pkg),
-      contentHash: contentHash(pkg),
-    }))
-    .filter((r) => r.version !== "");
+  const rows = evalRows(json, commitHash, committedAt, system);
 
   await db.exec("BEGIN");
 
@@ -388,6 +379,49 @@ describe("guards", () => {
     await expect(
       runImport(evalJson({ hello: { version: "2.12.1" } }), HASH(1), DAY(1), "x86_64-linux"),
     ).rejects.toThrow(/not newer than DB head/);
+  });
+
+  test("an eval with a store-hash-less row is refused before anything is written", async () => {
+    await runImport(evalJson({ hello: { version: "2.12.1" } }), HASH(1), DAY(1), "x86_64-linux");
+    const json = evalJson({ hello: { version: "2.12.1" }, phantom: { version: "1.0.0" } }) as Record<
+      string,
+      { outputs: unknown }
+    >;
+    json["phantom"]!.outputs = {};
+
+    await expect(runImport(json, HASH(2), DAY(2), "x86_64-linux")).rejects.toThrow(/1 of 2 rows have no store hash/);
+    expect(await rows(`SELECT count(*)::int AS n FROM commits`)).toEqual([{ n: 1 }]);
+    expect(await rows(`SELECT count(*)::int AS n FROM packages`)).toEqual([{ n: 1 }]);
+  });
+
+  test("the database refuses an empty store hash even if the importer guard is bypassed", async () => {
+    // Same statements importEval runs, with the guard skipped: a hand-run
+    // import or a different producer that leaks a stub must still fail.
+    await runImport(evalJson({ hello: { version: "2.12.1" } }), HASH(1), DAY(1), "x86_64-linux");
+    await db.exec("BEGIN");
+    await db.query(SQL.INSERT_COMMIT, [2, HASH(2), DAY(2).toISOString()]);
+    await db.exec(SQL.STAGE_KEYS_DDL);
+    await stage("stage_keys", SQL.STAGE_KEYS_COLUMNS, [
+      ["phantom", "phantom", "1.0.0", "phantom", "1".repeat(64), "2".repeat(64)],
+    ]);
+    await db.exec(SQL.INSERT_PACKAGES);
+    await db.exec(SQL.STAGE_VERSIONS_DDL);
+    const v = toVersionRow("phantom", "1.0.0");
+    await stage("stage_versions", SQL.STAGE_VERSIONS_COLUMNS, [
+      ["phantom", "1.0.0", v.sortKey, v.prerelease, v.semverMajor, v.semverMinor, v.semverPatch, v.semverPre],
+    ]);
+    await db.exec(SQL.INSERT_VERSIONS);
+    await db.exec(SQL.STAGE_META_DDL);
+    await stage("stage_meta", SQL.STAGE_META_COLUMNS, [["1".repeat(64), "", "", "", "", []]]);
+    await db.exec(SQL.INSERT_META);
+    await db.exec(SQL.STAGE_VARIANTS_DDL);
+    await stage("stage_variants", SQL.STAGE_VARIANTS_COLUMNS, [
+      ["phantom", "1.0.0", "phantom", "1".repeat(64), "", "phantom", "", [], "", false, false, [], "2".repeat(64)],
+    ]);
+
+    await expect(db.query(SQL.UPSERT_VARIANTS, ["x86_64-linux", 2])).rejects.toThrow(/variants_store_hash_nonempty/);
+    await db.exec("ROLLBACK");
+    expect(await rows(`SELECT count(*)::int AS n FROM variants`)).toEqual([{ n: 1 }]);
   });
 });
 

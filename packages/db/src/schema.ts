@@ -22,6 +22,7 @@ import {
   bigint,
   boolean,
   char,
+  check,
   customType,
   index,
   integer,
@@ -202,7 +203,11 @@ export const variants = pgTable(
     commitSeq: integer("commit_seq")
       .notNull()
       .references(() => commits.seq),
-    storeHash: text("store_hash").notNull().default(""),
+    // Never empty: a variant with no store path is a nix-env stub (see
+    // decodeEvalJson), not a package. The first live import wrote ~75k of
+    // them per commit before the decoder skipped stubs; this makes the
+    // database refuse them no matter which producer or decoder let one by.
+    storeHash: text("store_hash").notNull(),
     storeName: text("store_name").notNull().default(""),
     metaName: text("meta_name").notNull().default(""),
     metaVersion: jsonb("meta_version").$type<string[]>().notNull().default([]),
@@ -216,6 +221,7 @@ export const variants = pgTable(
     contentHash: char("content_hash", { length: 64 }).notNull(),
   },
   (t) => [
+    check("variants_store_hash_nonempty", sql`${t.storeHash} <> ''`),
     uniqueIndex("variants_identity_key").on(t.versionId, t.system, t.attrPath),
     // Attribute-path lookups: the API matches `name = ?1 OR attr_path = ?1`.
     index("variants_attr_path_idx").on(t.attrPath),
