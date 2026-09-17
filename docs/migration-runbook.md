@@ -472,11 +472,11 @@ surfaced these. Each one either produced a misleading error or no error at all.
   by `eval.yml` (#12/#13, devbox-search-indexer #4). The seed still holds
   x86_64-darwin variants for all 2,751 historical commits with their ranges
   open; they never advance past seq 2751. **Decision (#17): leave it.** The
-  data stays so `/v1/resolve` and `/v2/resolve` keep answering for Intel
-  Macs with the last known state (both API versions shipped while
-  x86_64-darwin still existed, so both return it), but the system is never
-  indexed again — x86_64-darwin is effectively deprecated. Don't close the ranges and don't add it back to
-  `SYSTEMS`. **`i686-linux` is in the same state** — seeded through seq 2751,
+  DB keeps the seeded x86_64-darwin rows exactly as they are, and the indexer
+  appends nothing new for that system — so any query for x86_64-darwin
+  returns the seed-era state and nothing later. x86_64-darwin is effectively
+  deprecated. Don't close the ranges and don't add it back to `SYSTEMS`.
+  **`i686-linux` is in the same state** — seeded through seq 2751,
   never in the indexer's system list — and gets the same treatment.
 - **A Linux eval is ~575 MB of JSON**, past V8's 536 MB string cap, so
   `JSON.parse(readFileSync(...))` throws `Cannot create a string longer than
