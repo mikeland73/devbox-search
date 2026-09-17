@@ -1,0 +1,891 @@
+openapi: 3.1.0
+
+# The API contract for search.devbox.sh, served by apps/web (Next.js route
+# handlers). This file is the hand-maintained source of truth for parameters,
+# response shapes and semantics; docs/apis/README.md is GENERATED from it by
+# `pnpm --filter @devbox-search/web gen:api-docs`, which also runs every
+# `x-example-requests` entry through the real route handlers against the
+# PGlite test fixture and embeds the captured responses.
+#
+# apps/web/lib/apiDocs.test.ts fails when a route in apps/web/app/**/route.ts
+# is missing here (or vice versa), or when README.md is out of date.
+#
+# Response shapes are frozen: shipped devbox CLIs parse them. See
+# apps/web/lib/render.ts for the Go structs they were ported from.
+
+info:
+  title: devbox-search
+  version: "2"
+  summary: Package resolution and search over the nixpkgs index behind search.devbox.sh.
+  description: |
+    Resolves Devbox package references (`python@3.11`) to nixpkgs flake
+    references (commit hash + attribute path), and searches the index by
+    name. The v1 and v2 endpoints are byte-compatible with the original Go
+    service so shipped devbox CLIs keep working; `/v2/resolve` is the CLI's
+    critical path.
+
+    ### Conventions shared by every endpoint
+
+    * **Methods.** Every endpoint is read-only. `GET` returns the response,
+      `HEAD` returns its headers, `OPTIONS` returns `204` with
+      `Allow: GET, HEAD, OPTIONS`, and `POST`/`PUT`/`PATCH`/`DELETE` return
+      `405` with the same `Allow` header. (`/readyz` only defines `GET` and
+      `HEAD`; the framework answers other methods with `405`.)
+    * **Input normalization.** Every query parameter is Unicode NFD-normalized
+      and trimmed of leading/trailing whitespace before use; `system` is also
+      lowercased. Empty (after trimming) required parameters yield `400`.
+    * **Name matching.** Wherever a `name` is accepted it matches either the
+      canonical package name *case-insensitively* or a nixpkgs attribute path
+      *case-sensitively* (`python`, `python311`, `nodePackages.typescript`).
+    * **Version matching** (`version` / `v` parameters):
+      * `latest` — the highest non-prerelease version, preferring one that is
+        not marked broken; if no non-prerelease version exists, the highest
+        prerelease.
+      * an exact version — `3.11.9`.
+      * a partial version, treated as a range on dot boundaries —
+        `3` ⇒ `>=3.0.0 <4.0.0`, `3.11` ⇒ `>=3.11.0 <3.12.0` (so `3.1` does
+        not match `3.11`).
+      * an npm-style range — `^3.11`, `~3.11.2`, `>=1.2 <2`, `>=1.2,<2`
+        (comparators separated by whitespace or commas; a leading `v` is
+        allowed on each version).
+      * anything not expressible as semver (dates, `1.1.1w`, ...) falls back
+        to prefix matching on a `.` or `-` boundary.
+
+      Within the matching set the highest version is returned.
+    * **Successful JSON responses** carry `Content-Type: application/json`,
+      `Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`,
+      and an `ETag` derived from the body.
+    * **Errors** are plain text in Go `http.Error` form —
+      `<status> <reason>: <message>` followed by a newline — with
+      `Content-Type: text/plain; charset=utf-8`,
+      `X-Content-Type-Options: nosniff` and
+      `Cache-Control: public, max-age=0, s-maxage=60`.
+    * **Timestamps.** v2 endpoints use RFC 3339 without fractional seconds
+      (`2026-01-03T00:00:00Z`); v1 endpoints use Unix seconds as a JSON
+      number.
+    * **`omitempty`.** In v1 (legacy) shapes, most fields were Go `omitempty`
+      fields: a zero value (`""`, `false`, `0`, `[]`) is *absent* from the
+      JSON, never `null`. Fields with this behaviour are marked **omitempty**
+      below.
+
+servers:
+  - url: https://search.devbox.sh
+
+tags:
+  - name: v2
+    description: Current API, used by the devbox CLI.
+  - name: v1
+    description: Legacy API kept for older devbox CLIs. `/resolve`, `/pkg` and `/db/search` are aliases.
+  - name: ops
+    description: Health check.
+
+paths:
+  /readyz:
+    get:
+      tags: [ops]
+      operationId: readyz
+      summary: Health check
+      description: |
+        Returns the literal `ok` plus a newline. Not cached
+        (`Cache-Control: no-store`).
+      x-methods: [GET, HEAD]
+      x-example-requests:
+        - summary: Health check
+          path: /readyz
+      responses:
+        "200":
+          description: The service is up.
+          content:
+            text/plain;charset=utf-8:
+              schema:
+                type: string
+                const: "ok\n"
+
+  /v2/resolve:
+    get:
+      tags: [v2]
+      operationId: v2Resolve
+      summary: Resolve a package reference to a nixpkgs flake reference
+      description: |
+        The devbox CLI's critical path: `go@latest` →
+        `github:NixOS/nixpkgs/<rev>#go_1_22`. Returns the single best-matching
+        version (see *Version matching*) with one entry per system on which
+        it exists.
+
+        **Single hash across systems.** When the same version is present on
+        several systems, the newest nixpkgs commit that contains it on
+        *every* returned system is chosen and emitted as the `rev` for all
+        of them, so one `nix` fetch serves every platform. If no such commit
+        is known, each system reports the commit of its own last change.
+      x-example-requests:
+        - summary: Latest version
+          path: /v2/resolve?name=python&version=latest
+        - summary: Partial version (dot-boundary range)
+          path: /v2/resolve?name=python&version=3.11
+        - summary: npm-style range
+          path: /v2/resolve?name=go&version=^1.21
+        - summary: Attribute path instead of a name
+          path: /v2/resolve?name=go_1_21&version=latest
+        - summary: No matching version
+          path: /v2/resolve?name=python&version=9.99
+        - summary: Missing parameter
+          path: /v2/resolve?name=python
+      parameters:
+        - $ref: "#/components/parameters/name"
+        - $ref: "#/components/parameters/version"
+      responses:
+        "200":
+          description: The resolved version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2Resolve"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: "No version of the package matches. The message describes the normalized query, e.g. `no package found for: name = \"python\" && version = \"9.99\"`."
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /v2/search:
+    get:
+      tags: [v2]
+      operationId: v2Search
+      summary: Search packages by name
+      description: |
+        Text search over package names and attribute paths. Ranking: exact
+        name match, then exact attribute-path match, then name prefix, then
+        attribute-path prefix, then trigram similarity; top-level nixpkgs
+        attributes outrank nested ones (`python3` above
+        `emacsPackages.python`). Ties are broken by name.
+
+        Returns the latest non-prerelease release of each matching package,
+        at most 50 packages. An empty result set is a `200` with
+        `total_results: 0`, not a `404`.
+      x-example-requests:
+        - summary: Search
+          path: /v2/search?q=go
+        - summary: No matches
+          path: /v2/search?q=zzzzzz
+      parameters:
+        - $ref: "#/components/parameters/q"
+      responses:
+        "200":
+          description: Matching packages, best match first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2Search"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /v2/pkg:
+    get:
+      tags: [v2]
+      operationId: v2Pkg
+      summary: Every release of one package
+      description: |
+        All versions of a package, newest first, with per-platform detail
+        and human-readable platform/output summaries for display.
+      x-example-requests:
+        - summary: Package detail
+          path: /v2/pkg?name=python
+        - summary: Unknown package
+          path: /v2/pkg?name=doesnotexist
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: The package and its releases.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2Pkg"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No package by that name. The body is the bare `404 Not Found:` line (no query description).
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /v1/resolve:
+    get:
+      tags: [v1]
+      operationId: v1Resolve
+      summary: Resolve a package reference (v1 shape)
+      description: |
+        Same matching rules as `/v2/resolve`, plus an optional `system`
+        filter, returning the single best-matching version in the legacy
+        shape. Each system reports its own commit (no single-hash
+        selection).
+      x-example-requests:
+        - summary: Latest version
+          path: /v1/resolve?name=python&version=latest
+        - summary: Restricted to one system
+          path: /v1/resolve?name=python&version=3.11&system=aarch64-darwin
+        - summary: No matching version
+          path: /v1/resolve?name=python&version=9.99&system=x86_64-linux
+      parameters:
+        - $ref: "#/components/parameters/name"
+        - $ref: "#/components/parameters/version"
+        - $ref: "#/components/parameters/system"
+      responses:
+        "200":
+          description: The resolved version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V1PackageVersion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No version matches. The message describes the normalized query, including `system` when given.
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /resolve:
+    get:
+      tags: [v1]
+      operationId: resolve
+      summary: Alias of /v1/resolve
+      description: Identical to `/v1/resolve`.
+      x-example-requests:
+        - summary: Partial version
+          path: /resolve?name=python&version=3.11
+      parameters:
+        - $ref: "#/components/parameters/name"
+        - $ref: "#/components/parameters/version"
+        - $ref: "#/components/parameters/system"
+      responses:
+        "200":
+          description: The resolved version.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V1PackageVersion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No version matches.
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /v1/pkg:
+    get:
+      tags: [v1]
+      operationId: v1Pkg
+      summary: Every version of one package (v1 shape)
+      description: |
+        All versions of a package, newest first, as a list of legacy
+        version objects (at most 1000 underlying rows).
+      x-example-requests:
+        - summary: Package versions
+          path: /v1/pkg?name=go
+        - summary: Unknown package
+          path: /v1/pkg?name=doesnotexist
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: The package's versions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/V1PackageVersion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: "No package by that name (`no package found for: name = \"...\"`)."
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /pkg/{name}:
+    get:
+      tags: [v1]
+      operationId: pkgByPath
+      summary: Alias of /v1/pkg with the name in the path
+      description: |
+        Identical to `/v1/pkg`, taking the package name from the path.
+        **Everything** after `/pkg/` is the name — including dots and
+        further slashes (`/pkg/nodePackages.typescript`) — after URL
+        decoding.
+      x-example-requests:
+        - summary: Dotted attribute path in the URL
+          path: /pkg/nodePackages.typescript
+      parameters:
+        - name: name
+          in: path
+          required: true
+          description: The package name or attribute path; the entire remainder of the URL path.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The package's versions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/V1PackageVersion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No package by that name.
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /pkg:
+    get:
+      tags: [v1]
+      operationId: pkgByQuery
+      summary: Alias of /v1/pkg
+      description: Identical to `/v1/pkg`; used when no name is given in the path.
+      x-example-requests:
+        - summary: Query-string form
+          path: /pkg?name=go
+        - summary: Missing name
+          path: /pkg
+      parameters:
+        - $ref: "#/components/parameters/name"
+      responses:
+        "200":
+          description: The package's versions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/V1PackageVersion"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          description: No package by that name.
+          content:
+            text/plain; charset=utf-8:
+              schema:
+                type: string
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /v1/search:
+    get:
+      tags: [v1]
+      operationId: v1Search
+      summary: Search packages by name (v1 shape)
+      description: |
+        Same ranking as `/v2/search`, but returns **every** version of each
+        matching package (at most 50 packages / 1000 rows) in the legacy
+        shape. An empty result set is `{"num_results":0}`.
+      x-example-requests:
+        - summary: Search
+          path: /v1/search?q=python
+        - summary: No matches
+          path: /v1/search?q=zzzzzz
+      parameters:
+        - $ref: "#/components/parameters/q"
+      responses:
+        "200":
+          description: Matching packages, best match first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V1Search"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /db/search:
+    get:
+      tags: [v1]
+      operationId: dbSearch
+      summary: Alias of /v1/search
+      description: Identical to `/v1/search`.
+      x-example-requests:
+        - summary: Search
+          path: /db/search?q=go
+      parameters:
+        - $ref: "#/components/parameters/q"
+      responses:
+        "200":
+          description: Matching packages, best match first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V1Search"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /search:
+    get:
+      tags: [v1]
+      operationId: search
+      summary: Search packages (oldest shape)
+      description: |
+        The original search endpoint. Without `v`, `q` is a search phrase
+        (same ranking as `/v2/search`, every version returned). With `v`,
+        `q` is treated as an exact **name** and the single version matching
+        `v` is returned (same rules as `/v2/resolve`).
+
+        Within each result, entries are collapsed to one per
+        `pname`+`version` (consecutive duplicates across systems are
+        dropped). An empty result set is `200` with `total_results: 0`.
+      x-example-requests:
+        - summary: Phrase search
+          path: /search?q=python
+        - summary: Name + version lookup
+          path: /search?q=python&v=3.11
+        - summary: Missing query
+          path: /search
+      parameters:
+        - $ref: "#/components/parameters/q"
+        - name: v
+          in: query
+          required: false
+          description: A version (see *Version matching*). When present, `q` is matched as an exact name rather than a search phrase.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Matching packages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Search"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+components:
+  parameters:
+    name:
+      name: name
+      in: query
+      required: true
+      description: Package name (case-insensitive) or nixpkgs attribute path (case-sensitive).
+      schema:
+        type: string
+      examples:
+        name: { value: python }
+        attrPath: { value: python311 }
+        nested: { value: nodePackages.typescript }
+    version:
+      name: version
+      in: query
+      required: true
+      description: "`latest`, an exact version, a partial version, or an npm-style range (see *Version matching*)."
+      schema:
+        type: string
+      examples:
+        latest: { value: latest }
+        exact: { value: 3.11.9 }
+        partial: { value: "3.11" }
+        range: { value: "^3.11" }
+    system:
+      name: system
+      in: query
+      required: false
+      description: Restrict results to one Nix system (lowercased before matching).
+      schema:
+        type: string
+        enum: [aarch64-darwin, aarch64-linux, x86_64-darwin, x86_64-linux]
+    q:
+      name: q
+      in: query
+      required: true
+      description: Search phrase, matched against package names and attribute paths.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: "A required parameter is missing or empty, e.g. `400 Bad Request: empty name (set a ?name=<value> query parameter)`."
+      content:
+        text/plain; charset=utf-8:
+          schema:
+            type: string
+    ServerError:
+      description: "The database query failed. `500 Internal Server Error`, optionally followed by `: <context>`."
+      content:
+        text/plain; charset=utf-8:
+          schema:
+            type: string
+
+  schemas:
+    # ------------------------------------------------------------------ v2
+    V2Resolve:
+      type: object
+      description: One resolved version, keyed by system.
+      required: [name, version, summary, systems]
+      properties:
+        name:
+          type: string
+          description: Canonical package name.
+        version:
+          type: string
+        summary:
+          type: string
+          description: The package's one-line description (`meta.description` in nixpkgs).
+        systems:
+          type: object
+          description: One entry per Nix system on which this version exists.
+          additionalProperties:
+            $ref: "#/components/schemas/V2ResolveSystem"
+
+    V2ResolveSystem:
+      type: object
+      required: [flake_installable, last_updated]
+      properties:
+        flake_installable:
+          $ref: "#/components/schemas/FlakeInstallable"
+        last_updated:
+          type: string
+          format: date-time
+          description: Commit date of `flake_installable.ref.rev` (RFC 3339, no fractional seconds).
+        outputs:
+          type: array
+          description: The derivation's outputs. **omitempty** — absent when there are none.
+          items:
+            $ref: "#/components/schemas/Output"
+
+    FlakeInstallable:
+      type: object
+      required: [ref, attr_path]
+      properties:
+        ref:
+          $ref: "#/components/schemas/FlakeRef"
+        attr_path:
+          type: string
+          description: Attribute path within nixpkgs, e.g. `python311`. When several paths yield the same package the first (alphabetically) is used.
+
+    FlakeRef:
+      type: object
+      description: Always a GitHub reference to NixOS/nixpkgs.
+      required: [type, owner, repo, rev]
+      properties:
+        type:
+          type: string
+          const: github
+        owner:
+          type: string
+          const: NixOS
+        repo:
+          type: string
+          const: nixpkgs
+        rev:
+          type: string
+          description: 40-character nixpkgs commit hash.
+
+    Output:
+      type: object
+      description: A derivation output. Every field is **omitempty**; in particular `default` is only present when `true`.
+      properties:
+        name:
+          type: string
+          description: Output name, e.g. `out`, `bin`, `dev`, `man`.
+        path:
+          type: string
+          description: Nix store path of the output.
+        default:
+          type: boolean
+          description: Whether the output is installed by default.
+
+    V2Search:
+      type: object
+      required: [query, total_results, results]
+      properties:
+        query:
+          type: string
+          description: The normalized search phrase.
+        total_results:
+          type: integer
+          description: Number of entries in `results`.
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2SearchResult"
+
+    V2SearchResult:
+      type: object
+      required: [name, summary, last_updated]
+      properties:
+        name:
+          type: string
+        summary:
+          type: string
+        last_updated:
+          type: string
+          format: date-time
+          description: Commit date of the package's latest release.
+
+    V2Pkg:
+      type: object
+      required: [name, summary, homepage_url, license, releases]
+      properties:
+        name:
+          type: string
+        summary:
+          type: string
+        homepage_url:
+          type: string
+        license:
+          type: string
+          description: SPDX identifier, or the license's short name when it has none.
+        releases:
+          type: array
+          description: Newest version first.
+          items:
+            $ref: "#/components/schemas/V2Release"
+
+    V2Release:
+      type: object
+      required: [version, last_updated, platforms, platforms_summary, outputs_summary]
+      properties:
+        version:
+          type: string
+        last_updated:
+          type: string
+          format: date-time
+          description: The newest `date` among `platforms`.
+        platforms:
+          type: array
+          description: One entry per system (a system with several attribute paths is listed once).
+          items:
+            $ref: "#/components/schemas/V2Platform"
+        platforms_summary:
+          type: string
+          description: Display string such as `Linux and macOS (Apple Silicon only)`; empty when no supported platform is present.
+        outputs_summary:
+          type: string
+          description: Display string such as `out, debug (Linux only)`; empty when every output is installed by default.
+
+    V2Platform:
+      type: object
+      required: [arch, os, system, attribute_path, commit_hash, date, outputs]
+      properties:
+        arch:
+          type: string
+          description: "`x86-64` or `arm64`; empty for other systems."
+        os:
+          type: string
+          description: "`Linux` or `macOS`; empty for other systems."
+        system:
+          type: string
+          description: Nix system, e.g. `aarch64-darwin`.
+        attribute_path:
+          type: string
+        commit_hash:
+          type: string
+          description: nixpkgs commit of this variant's last change.
+        date:
+          type: string
+          format: date-time
+        outputs:
+          type: array
+          items:
+            $ref: "#/components/schemas/Output"
+
+    # ------------------------------------------------------------------ v1
+    V1PackageVersion:
+      type: object
+      description: |
+        One version of a package. Every field except `name` is **omitempty**.
+        The top-level fields describe the first system's variant; `systems`
+        carries the per-system detail.
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Canonical package name. Always present.
+        commit_hash:
+          type: string
+          description: nixpkgs commit hash.
+        last_updated:
+          type: integer
+          description: Commit date as Unix seconds.
+        version:
+          type: string
+        platforms:
+          type: array
+          description: Systems the package declares support for (`meta.platforms`), filtered to the four devbox supports.
+          items:
+            type: string
+        summary:
+          type: string
+        description:
+          type: string
+          description: Long description (`meta.longDescription`).
+        homepage:
+          type: string
+        license:
+          type: string
+        systems:
+          type: object
+          description: Per-system detail, keyed by Nix system.
+          additionalProperties:
+            $ref: "#/components/schemas/V1PackageInfo"
+
+    V1PackageInfo:
+      type: object
+      description: Per-system detail for one version. Every field is **omitempty**.
+      properties:
+        commit_hash:
+          type: string
+        last_updated:
+          type: integer
+          description: Unix seconds.
+        version:
+          type: string
+        platforms:
+          type: array
+          items:
+            type: string
+        summary:
+          type: string
+        description:
+          type: string
+        homepage:
+          type: string
+        license:
+          type: string
+        system:
+          type: string
+        store_hash:
+          type: string
+          description: The 32-character hash of the first output's store path.
+        store_name:
+          type: string
+          description: The derivation's `pname` (`python3` for `python3-3.11.9`).
+        store_version:
+          type: string
+          description: The derivation's `version`; identical to `version`.
+        meta_name:
+          type: string
+          description: "`meta.name` (usually `<pname>-<version>`)."
+        meta_version:
+          type: array
+          description: A single-element array holding `meta.version`.
+          items:
+            type: string
+        attr_paths:
+          type: array
+          description: Every attribute path yielding this package on this system.
+          items:
+            type: string
+        programs:
+          type: array
+          description: Main programs (`meta.mainProgram`) of the attribute paths, when set.
+          items:
+            type: string
+        broken:
+          type: boolean
+          description: "`meta.broken`; present only when `true`."
+        insecure:
+          type: boolean
+          description: "`meta.insecure`; present only when `true`."
+
+    V1Search:
+      type: object
+      required: [num_results]
+      properties:
+        num_results:
+          type: integer
+          description: Number of packages.
+        packages:
+          type: array
+          description: Best match first. **omitempty** — absent when there are no results.
+          items:
+            $ref: "#/components/schemas/V1SearchPackage"
+
+    V1SearchPackage:
+      type: object
+      required: [name, num_versions]
+      properties:
+        name:
+          type: string
+        num_versions:
+          type: integer
+        versions:
+          type: array
+          description: Newest first. **omitempty**.
+          items:
+            $ref: "#/components/schemas/V1PackageVersion"
+
+    Search:
+      type: object
+      required: [metadata, results]
+      properties:
+        metadata:
+          type: object
+          required: [total_results]
+          properties:
+            total_results:
+              type: integer
+              description: Number of entries in `results`.
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/SearchResult"
+
+    SearchResult:
+      type: object
+      required: [name, packages]
+      properties:
+        name:
+          type: string
+        packages:
+          type: array
+          description: One entry per `pname`+`version`, newest first.
+          items:
+            $ref: "#/components/schemas/SearchPackage"
+
+    SearchPackage:
+      type: object
+      description: Every field is **omitempty**.
+      properties:
+        attribute_path:
+          type: string
+        pname:
+          type: string
+          description: "`meta.name` of the derivation."
+        version:
+          type: string
+        date:
+          type: string
+          format: date-time
+          description: Commit date (RFC 3339).
+        nixpkg_commit:
+          type: string
+          description: nixpkgs commit hash.

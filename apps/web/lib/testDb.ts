@@ -64,6 +64,10 @@ export interface FixturePackage {
   name: string;
   versions: FixtureVersion[];
   summary?: string;
+  homepage?: string;
+  license?: string;
+  /** `meta.mainProgram`; defaults to the package name. */
+  program?: string;
 }
 
 export const SYSTEMS = ["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux"];
@@ -85,10 +89,12 @@ export async function seedPackage(db: SearchDb, fixture: FixturePackage): Promis
   const packageId = pkg!.id;
 
   const summary = fixture.summary ?? `${fixture.name} summary`;
-  const metaHash = sha256Hex(JSON.stringify({ summary }));
+  const homepage = fixture.homepage ?? "";
+  const license = fixture.license ?? "";
+  const metaHash = sha256Hex(JSON.stringify({ summary, homepage, license }));
   const [metaRow] = await db
     .insert(meta)
-    .values({ hash: metaHash, summary, platforms: SYSTEMS })
+    .values({ hash: metaHash, summary, homepage, license, platforms: SYSTEMS })
     .onConflictDoNothing()
     .returning({ id: meta.id });
   const metaId =
@@ -124,7 +130,7 @@ export async function seedPackage(db: SearchDb, fixture: FixturePackage): Promis
         storeHash: sha256Hex(ident).slice(0, 32),
         storeName: fixture.name,
         metaName: `${fixture.name}-${v.version}`,
-        program: fixture.name,
+        program: fixture.program ?? fixture.name,
         broken: v.broken ?? false,
         outputs: [{ name: "out", path: `/nix/store/${sha256Hex(ident).slice(0, 32)}-${ident}`, default: true }],
         contentHash: sha256Hex(ident),

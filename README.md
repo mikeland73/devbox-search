@@ -17,7 +17,22 @@ packages/db/        Drizzle schema + migrations (Neon Postgres)
 packages/indexer/   commit discovery, nix-env eval, incremental import, seed
 apps/web/           Next.js route handlers (v1/v2 API)
 tools/              one-off scripts (shadow corpus recorder, ...)
+docs/apis/          HTTP API reference: openapi.yaml (source of truth) and
+                    the generated README.md
 ```
+
+## API documentation
+
+`docs/apis/openapi.yaml` describes every endpoint; `docs/apis/README.md` is
+generated from it, with example responses captured by running the route
+handlers against the test fixture:
+
+```
+pnpm --filter @devbox-search/web gen:api-docs
+```
+
+`apps/web/lib/apiDocs.test.ts` fails when a `route.ts` is missing from the
+spec or the README is stale, so `pnpm test` keeps the docs honest.
 
 ## Development
 
