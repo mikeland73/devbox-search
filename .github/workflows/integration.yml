@@ -1,0 +1,50 @@
+# Integration test against the live Vercel deployment of every commit.
+#
+# Vercel's GitHub app creates a GitHub Deployment for each push — Preview for
+# a branch (so every PR), Production for main — and reports its progress as
+# deployment_status events. Triggering on that event, rather than on
+# pull_request/push, means the test starts exactly when the deployment is
+# ready, against the URL Vercel reports, with no polling and no Vercel token.
+#
+# The run is attributed to the deployed commit, so on a PR it shows up as a
+# check on the head commit; on main it checks the production deployment
+# (the unique deployment URL, which is the same build the production alias
+# points at). Deployment Protection is off on the project, so preview URLs
+# are reachable without a bypass header (see the runbook).
+#
+# What is checked lives in tools/integration.test.mjs; run it by hand with
+# BASE_URL=https://... node --test tools/integration.test.mjs.
+name: integration
+
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    # Vercel also emits pending/in_progress/failure/inactive; only a ready
+    # deployment is worth hitting.
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # environment_url is the deployment URL; target_url is the same thing
+      # on older payloads.
+      BASE_URL: ${{ github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
+      ENVIRONMENT: ${{ github.event.deployment.environment }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit that was deployed, not whatever the branch has moved to.
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Test ${{ github.event.deployment.environment }}
+        run: |
+          echo "## ${ENVIRONMENT}: ${BASE_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "commit \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          node --test --test-reporter=spec tools/integration.test.mjs

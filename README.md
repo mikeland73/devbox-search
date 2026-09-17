@@ -45,6 +45,15 @@ pnpm typecheck
 pnpm lint
 ```
 
+Every Vercel deployment — the preview of each PR and the production deploy of
+`main` — is also exercised end to end by `.github/workflows/integration.yml`
+(searches, resolves, `/status`, error bodies) as soon as Vercel reports it
+ready. The same script runs against any URL:
+
+```
+BASE_URL=https://devbox-search.vercel.app node --test tools/integration.test.mjs
+```
+
 ## Version ordering
 
 The old Go service compared versions with a semver → PEP 440 → simple-split
