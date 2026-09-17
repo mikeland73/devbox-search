@@ -20,8 +20,7 @@ import {
   variants,
   versions,
 } from "@devbox-search/db";
-import { db } from "./search";
-import { rowsOf } from "./singleHash";
+import { db, rowsOf } from "./search";
 
 /** One point on the commit timeline. */
 export interface CommitRef {

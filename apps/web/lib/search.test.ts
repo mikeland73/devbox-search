@@ -52,6 +52,63 @@ describe("searchByPhrase ranking", () => {
     const latest = await search({ phrase: "go", version: "latest" });
     expect(uniqueNames(latest)).toEqual(["go-a", "go-b", "go-c"]);
   });
+
+  test("an attribute-path prefix match is admitted even when the name is unrelated", async () => {
+    await seedPackage(t.db, { name: "cpython", versions: [{ version: "3.12.0", attrPath: "python312" }] });
+
+    const latest = await search({ phrase: "python3", version: "latest" });
+    expect(uniqueNames(latest)).toEqual(["cpython"]);
+  });
+});
+
+describe("searchByPhrase candidate tiers", () => {
+  // The ranked query evaluates two candidate tiers — exact/prefix matches,
+  // then trigram-similarity matches — and skips the second when the first
+  // already fills the result cap. These tests pin the equivalence that makes
+  // the skip safe: the result must be exactly what a single ranking over all
+  // candidates produces, whether or not the fuzzy tier ran.
+
+  /** Seeds `n` packages named `${stem}-000` .. `${stem}-(n-1)`. */
+  async function seedPrefixed(stem: string, n: number): Promise<string[]> {
+    const names = Array.from({ length: n }, (_, i) => `${stem}-${String(i).padStart(3, "0")}`);
+    // Reverse order so an insertion-order pass cannot masquerade as ranking.
+    for (const name of [...names].reverse()) {
+      await seedPackage(t.db, { name, versions: [{ version: "1.0.0" }] });
+    }
+    return names;
+  }
+
+  test("a similarity-only match appears when the prefix tier has room", async () => {
+    const prefixed = await seedPrefixed("py", 49);
+    // pg_trgm trigrams words separately, so "yq-py" shares every trigram of
+    // "py" (similarity 0.5) without being a prefix match — the same reason
+    // "yq-go" is a hit for "go" above.
+    await seedPackage(t.db, { name: "yq-py", versions: [{ version: "1.0.0" }] });
+
+    const latest = await search({ phrase: "py", version: "latest" });
+    expect(uniqueNames(latest)).toEqual([...prefixed, "yq-py"]);
+  }, 60_000);
+
+  test("a similarity-only match is cut when the prefix tier is full, and the cap holds", async () => {
+    const prefixed = await seedPrefixed("py", 51);
+    // "yq-py" is more similar to "py" (0.5) than any "py-NNN" is, so it is
+    // cut on tier alone — which is the property that lets the fuzzy tier be
+    // skipped when the prefix tier is full.
+    await seedPackage(t.db, { name: "yq-py", versions: [{ version: "1.0.0" }] });
+
+    const latest = await search({ phrase: "py", version: "latest" });
+    expect(latest).toHaveLength(50);
+    expect(uniqueNames(latest)).toEqual(prefixed.slice(0, 50));
+  }, 60_000);
+
+  test("a full prefix tier still yields to a better prefix match seeded last", async () => {
+    await seedPrefixed("py", 50);
+    await seedPackage(t.db, { name: "py", versions: [{ version: "1.0.0" }] });
+
+    const latest = await search({ phrase: "py", version: "latest" });
+    expect(uniqueNames(latest)[0]).toBe("py");
+    expect(latest).toHaveLength(50);
+  }, 60_000);
 });
 
 /** Names in first-seen order (results may hold several rows per package). */

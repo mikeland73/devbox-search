@@ -29,6 +29,13 @@
       "when": 1789662865126,
       "tag": "0003_commit_systems_nix_version",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789682343505,
+      "tag": "0004_search_terms_attr_path_lower_idx",
+      "breakpoints": true
     }
   ]
 }
