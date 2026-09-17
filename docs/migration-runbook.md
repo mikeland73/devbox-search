@@ -503,7 +503,7 @@ surfaced these. Each one either produced a misleading error or no error at all.
 - **`semver_major/minor/patch` had to be `bigint`.** nixpkgs has 99
   strict-semver versions with a date-stamped component (`3.1.20220119140128`,
   widest 14 digits) that overflow int4; `parseSemver` accepts up to 2^53.
-  Migration `0001_semver_bigint`. **Prod needs `db migrate` before its seed.**
+  Migration `0001_semver_bigint`, applied to `main` (the only branch) on 2026-09-17.
   The importer's temp `stage_versions` table was missed and stayed `integer`
   until #30 (first real hit: `8b7dc2ca` with `0.1.20260720092025`, during
   the #20 catch-up). Any new temp/staging DDL must mirror the real types.
