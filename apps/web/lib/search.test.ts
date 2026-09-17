@@ -58,3 +58,29 @@ describe("searchByPhrase ranking", () => {
 function uniqueNames(pkgs: Array<{ name: string }>): string[] {
   return [...new Set(pkgs.map((p) => p.name))];
 }
+
+describe("result row decoding", () => {
+  // The drivers hand timestamps back as strings; only a schema column (not a
+  // raw `sql` fragment) goes through drizzle's Date mapping. The renderers
+  // call `.toISOString()` on lastUpdated, so a string here is a 500.
+  test("lastUpdated and commitHash come from the commits table as Date and string", async () => {
+    await seedPackage(t.db, { name: "ripgrep", versions: [{ version: "14.1.0" }] });
+    const committedAt = new Date(Date.UTC(2026, 0, 1));
+
+    const queries = [
+      { phrase: "ripgrep" },
+      { phrase: "ripgrep", version: "latest" },
+      { name: "ripgrep" },
+      { name: "ripgrep", version: "latest" },
+    ];
+    for (const q of queries) {
+      const rows = await search(q);
+      expect(rows.length, JSON.stringify(q)).toBeGreaterThan(0);
+      for (const row of rows) {
+        expect(row.lastUpdated, JSON.stringify(q)).toBeInstanceOf(Date);
+        expect(row.lastUpdated.getTime()).toBe(committedAt.getTime());
+        expect(row.commitHash).toBe("1".padStart(40, "0"));
+      }
+    }
+  });
+});
