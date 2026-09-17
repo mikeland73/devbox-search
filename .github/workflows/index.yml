@@ -120,6 +120,7 @@ jobs:
           # runs it created (`gh run list --created`).
           echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           dispatched='[]'
+          failed=0
           while IFS=$'\t' read -r hash committed_at systems; do
             ts=$(date -u -d "$committed_at" +%s)
             absent='[]'
@@ -132,13 +133,19 @@ jobs:
               fi
             done
             if [ "$absent" != '[]' ]; then
-              gh workflow run eval.yml -R "$EVAL_REPO" -f "commit=$hash" -f "committed_at=$committed_at" -f "systems=$absent"
-              echo "dispatched $hash ($committed_at) $absent" | tee -a "$GITHUB_STEP_SUMMARY"
-              dispatched=$(jq -c --arg h "$hash" --arg d "$committed_at" --argjson s "$absent" '. + [{hash: $h, committedAt: $d, systems: $s}]' <<<"$dispatched")
+              # One failed dispatch must not abort the rest of the batch; the
+              # commit it belongs to is simply re-listed by discover tomorrow.
+              if gh workflow run eval.yml -R "$EVAL_REPO" -f "commit=$hash" -f "committed_at=$committed_at" -f "systems=$absent"; then
+                echo "dispatched $hash ($committed_at) $absent" | tee -a "$GITHUB_STEP_SUMMARY"
+                dispatched=$(jq -c --arg h "$hash" --arg d "$committed_at" --argjson s "$absent" '. + [{hash: $h, committedAt: $d, systems: $s}]' <<<"$dispatched")
+              else
+                echo "::error::dispatch failed for $hash $absent"; failed=$(( failed + 1 ))
+              fi
             fi
           done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | join(" "))"' <<<"$COMMITS")
           echo "dispatched=$dispatched" >> "$GITHUB_OUTPUT"
-          echo "evals dispatched: $(jq length <<<"$dispatched")"
+          echo "evals dispatched: $(jq length <<<"$dispatched"), failed: $failed"
+          [ "$failed" -eq 0 ]
 
       # Poll R2 for the keys we just dispatched. Done when they are all there,
       # when every eval run started since dispatch has finished (so a missing
@@ -148,7 +155,8 @@ jobs:
       # "nothing active". Leaving on the cap is not an error: whatever landed
       # is imported now and the rest is re-listed by discover tomorrow.
       - name: Wait for evals
-        if: steps.dispatch.outcome == 'success' && steps.dispatch.outputs.dispatched != '[]'
+        # Wait for whatever did get dispatched, even if some dispatches failed.
+        if: steps.dispatch.outputs.dispatched != '' && steps.dispatch.outputs.dispatched != '[]'
         env:
           GH_TOKEN: ${{ secrets.INDEXER_DISPATCH_TOKEN }}
           DISPATCHED: ${{ steps.dispatch.outputs.dispatched }}
@@ -170,7 +178,9 @@ jobs:
               echo "all dispatched evals archived after $(( ($(date +%s) - start) / 60 )) min"
               break
             fi
-            runs=$(gh run list -R "$EVAL_REPO" --workflow=eval.yml --created ">=$STARTED_AT" --limit 100 --json status,conclusion,url)
+            # A failed listing (rate limit, blip) is a "still waiting", never a
+            # failed step: the fetch and import below must run regardless.
+            runs=$(gh run list -R "$EVAL_REPO" --workflow=eval.yml --created ">=$STARTED_AT" --limit 100 --json status,conclusion,url) || { echo "gh run list failed; retrying next poll"; runs='[]'; }
             total=$(jq length <<<"$runs")
             active=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
             if [ "$total" -ge "$expected" ] && [ "$active" -eq 0 ]; then
@@ -235,5 +245,5 @@ jobs:
       - name: Fail if dispatch failed
         if: steps.dispatch.outcome == 'failure'
         run: |
-          echo "::error::dispatching evals to $EVAL_REPO failed; archived evals were still imported. Check INDEXER_DISPATCH_TOKEN."
+          echo "::error::at least one eval dispatch to $EVAL_REPO failed (see the dispatch step); archived evals were still imported. If all of them failed, check INDEXER_DISPATCH_TOKEN."
           exit 1
