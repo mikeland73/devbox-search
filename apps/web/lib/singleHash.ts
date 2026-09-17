@@ -26,6 +26,16 @@ interface RangeRow {
 }
 
 /**
+ * Rows of a raw `execute` result. Drivers disagree on the container:
+ * neon-http returns an object with `rows`, PGlite (tests) too, and some
+ * drivers return the array directly.
+ */
+function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  return (result as { rows: T[] }).rows;
+}
+
+/**
  * Rewrites `commitHash`/`lastUpdated` so that every system shares the newest
  * commit that contains this version on all of them. Returns the input
  * unchanged when no such commit exists.
@@ -52,7 +62,7 @@ export async function singleHashAcrossSystems(pkgs: ResultPackage[]): Promise<Re
       JOIN packages p ON p.id = ver.package_id
       WHERE lower(p.name) = lower(${name}) AND ver.version = ${version}
     `);
-    ranges = (Array.isArray(result) ? result : result.rows) as unknown as RangeRow[];
+    ranges = rowsOf<RangeRow>(result);
   } catch {
     // Never fail a resolve because the optimization couldn't run.
     return pkgs;
@@ -81,11 +91,7 @@ export async function singleHashAcrossSystems(pkgs: ResultPackage[]): Promise<Re
     const result = await db().execute(
       sql`SELECT hash, committed_at FROM commits WHERE seq = ${best}`,
     );
-    const rows = (Array.isArray(result) ? result : result.rows) as unknown as Array<{
-      hash: string;
-      committed_at: string | Date;
-    }>;
-    commit = rows[0];
+    commit = rowsOf<{ hash: string; committed_at: string | Date }>(result)[0];
   } catch {
     return pkgs;
   }

@@ -21,8 +21,9 @@
  */
 
 import { and, asc, desc, eq, isNotNull, or, sql, type SQL } from "drizzle-orm";
+import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { escapeLike, normalize } from "@devbox-search/core";
-import { createServingClient, meta, packages, variants, versions, type ServingDb } from "@devbox-search/db";
+import { createServingClient, meta, packages, schema, variants, versions } from "@devbox-search/db";
 import { parseConstraint, satisfies, type Constraint } from "./constraint";
 
 export interface SearchQuery {
@@ -65,12 +66,23 @@ export interface ResultPackage {
   outputs: Array<{ name: string; path: string; default: boolean }>;
 }
 
-let cached: ServingDb | undefined;
+/**
+ * Any drizzle Postgres database over our schema. The serving client is
+ * neon-http; tests substitute an in-process PGlite via {@link useDb}.
+ */
+export type SearchDb = PgDatabase<PgQueryResultHKT, typeof schema>;
+
+let cached: SearchDb | undefined;
 
 /** The process-wide serving client (neon-http holds no connections). */
-export function db(): ServingDb {
+export function db(): SearchDb {
   cached ??= createServingClient();
   return cached;
+}
+
+/** Test seam: route every query at `override` (undefined restores the default). */
+export function useDb(override: SearchDb | undefined): void {
+  cached = override;
 }
 
 /** Normalizes a query the same way the Go service did before hitting the DB. */
