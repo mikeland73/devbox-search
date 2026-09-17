@@ -26,6 +26,21 @@ export const EXISTING_IMPORT = `
 
 export const HEAD_COMMIT = `SELECT seq, committed_at FROM commits ORDER BY seq DESC LIMIT 1`;
 
+/**
+ * $1 text[] of expected systems. Commits already in the DB that are missing
+ * at least one of them, oldest first — the backfill set for discover.
+ */
+export const INCOMPLETE_COMMITS = `
+  SELECT c.hash, c.committed_at,
+         array_agg(s) FILTER (WHERE cs.system IS NULL) AS missing
+  FROM commits c
+  CROSS JOIN unnest($1::text[]) AS s
+  LEFT JOIN commit_systems cs ON cs.commit_seq = c.seq AND cs.system = s
+  GROUP BY c.seq, c.hash, c.committed_at
+  HAVING count(*) FILTER (WHERE cs.system IS NULL) > 0
+  ORDER BY c.seq
+`;
+
 /** $1 commit hash. */
 export const COMMIT_BY_HASH = `SELECT seq FROM commits WHERE hash = $1`;
 

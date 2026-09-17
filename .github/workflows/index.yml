@@ -58,7 +58,8 @@ jobs:
       - run: pnpm -r build
 
       - id: discover
-        run: node packages/indexer/dist/cli.js discover --limit "${{ inputs.limit || '4' }}"
+        # --systems: known commits missing any of these are re-listed for backfill.
+        run: node packages/indexer/dist/cli.js discover --limit "${{ inputs.limit || '4' }}" --systems "${SYSTEMS// /,}"
         env:
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -83,7 +84,9 @@ jobs:
 
       # Pull whatever the public repo has archived for the pending commits
       # into the eval-{system}-{hash}/ layout the importer reads. Absent keys
-      # are normal (not evaluated yet) and are left for dispatch.
+      # are normal (not evaluated yet) and are left for dispatch. Each commit
+      # carries its own system list from discover: all of SYSTEMS for a new
+      # release, only the missing ones for a backfill.
       - id: fetch
         name: Fetch archived evals from R2
         env:
@@ -93,10 +96,10 @@ jobs:
           COMMITS: ${{ needs.discover.outputs.commits }}
         run: |
           missing='[]'
-          while IFS=$'\t' read -r hash committed_at; do
+          while IFS=$'\t' read -r hash committed_at systems; do
             ts=$(date -u -d "$committed_at" +%s)
             absent='[]'
-            for system in $SYSTEMS; do
+            for system in $systems; do
               key="$system/$ts-$hash.json.gz"
               dir="evals/eval-$system-$hash"
               if aws --endpoint-url "${{ secrets.R2_ENDPOINT }}" s3 cp "s3://${{ secrets.R2_BUCKET }}/$key" "$dir/eval.json.gz" 2>/dev/null; then
@@ -108,7 +111,7 @@ jobs:
             if [ "$absent" != '[]' ]; then
               missing=$(jq -c --arg h "$hash" --arg d "$committed_at" --argjson s "$absent" '. + [{hash: $h, committedAt: $d, systems: $s}]' <<<"$missing")
             fi
-          done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)"' <<<"$COMMITS")
+          done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | join(" "))"' <<<"$COMMITS")
           echo "missing=$missing" >> "$GITHUB_OUTPUT"
           echo "commits still needing eval: $(jq length <<<"$missing")"
 

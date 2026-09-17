@@ -420,3 +420,29 @@ describe("new version of an existing package", () => {
     ]);
   });
 });
+
+describe("INCOMPLETE_COMMITS (discover's backfill query)", () => {
+  const SYSTEMS = ["x86_64-linux", "aarch64-linux", "aarch64-darwin"];
+  async function seedCommit(seq: number, hash: string, systems: string[]): Promise<void> {
+    await db.query(`INSERT INTO commits (seq, hash, committed_at) VALUES ($1, $2, $3)`, [seq, hash, new Date(2026, 0, seq)]);
+    for (const s of systems) await db.query(`INSERT INTO commit_systems (commit_seq, system) VALUES ($1, $2)`, [seq, s]);
+  }
+
+  test("reports each commit missing any expected system, oldest first, with the missing set", async () => {
+    await seedCommit(1, "a".repeat(40), [...SYSTEMS, "i686-linux", "x86_64-darwin"]); // seeded: complete
+    await seedCommit(2, "b".repeat(40), ["aarch64-darwin"]); // one system landed
+    await seedCommit(3, "c".repeat(40), SYSTEMS); // complete
+    await seedCommit(4, "d".repeat(40), ["x86_64-linux", "aarch64-linux"]); // darwin missing
+    const { rows } = await db.query<{ hash: string; missing: string[] }>(SQL.INCOMPLETE_COMMITS, [SYSTEMS]);
+    expect(rows.map((r) => [r.hash[0], [...r.missing].sort()])).toEqual([
+      ["b", ["aarch64-linux", "x86_64-linux"]],
+      ["d", ["aarch64-darwin"]],
+    ]);
+  });
+
+  test("extra systems a commit has beyond the expected list do not count as incomplete", async () => {
+    await seedCommit(1, "a".repeat(40), [...SYSTEMS, "i686-linux"]);
+    const { rows } = await db.query(SQL.INCOMPLETE_COMMITS, [SYSTEMS]);
+    expect(rows).toHaveLength(0);
+  });
+});
