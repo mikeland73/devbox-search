@@ -27,14 +27,14 @@ const ALLOWED_METHODS = "GET, HEAD, OPTIONS";
  * Go marshalled with SetEscapeHTML(false); JSON.stringify already does not
  * escape HTML, so the bytes match.
  */
-export function json(body: unknown, init: { status?: number } = {}): Response {
+export function json(body: unknown, init: { status?: number; cacheControl?: string } = {}): Response {
   const text = JSON.stringify(body);
   const etag = `"${createHash("sha256").update(text).digest("base64url").slice(0, 27)}"`;
   return new Response(text, {
     status: init.status ?? 200,
     headers: {
       "Content-Type": "application/json",
-      "Cache-Control": CACHE_CONTROL,
+      "Cache-Control": init.cacheControl ?? CACHE_CONTROL,
       ETag: etag,
     },
   });
