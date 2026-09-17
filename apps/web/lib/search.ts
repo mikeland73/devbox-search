@@ -348,28 +348,33 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const phrase = q.phrase!;
   const latestOnly = q.version === "latest";
 
+  // The tiered score. Note: the same expression is passed to orderBy, so the
+  // ordering cannot silently drift from what is selected (ordering by a
+  // positional ordinal once pointed at `name` instead).
+  const rank = sql<number>`
+    max(
+      CASE
+        WHEN lower(search_terms.name) = lower(${phrase}) THEN 1000
+        WHEN lower(search_terms.attr_path) = lower(${phrase}) THEN 900
+        WHEN lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 800
+        WHEN lower(search_terms.attr_path) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 700
+        ELSE 0
+      END
+      + 100 * greatest(
+          similarity(search_terms.name, ${phrase}),
+          similarity(search_terms.attr_path, ${phrase})
+        )
+      -- Top-level attributes outrank nested ones, mirroring the old
+      -- 10x FTS column weight ("python" -> python3, not
+      -- emacs28Packages.python3).
+      + CASE WHEN search_terms.top_level_attr IS NOT NULL THEN 25 ELSE 0 END
+    )`;
+
   const ranked = await db()
     .select({
       packageId: sql<number>`search_terms.package_id`,
       name: sql<string>`search_terms.name`,
-      rank: sql<number>`
-        max(
-          CASE
-            WHEN lower(search_terms.name) = lower(${phrase}) THEN 1000
-            WHEN lower(search_terms.attr_path) = lower(${phrase}) THEN 900
-            WHEN lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 800
-            WHEN lower(search_terms.attr_path) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 700
-            ELSE 0
-          END
-          + 100 * greatest(
-              similarity(search_terms.name, ${phrase}),
-              similarity(search_terms.attr_path, ${phrase})
-            )
-          -- Top-level attributes outrank nested ones, mirroring the old
-          -- 10x FTS column weight ("python" -> python3, not
-          -- emacs28Packages.python3).
-          + CASE WHEN search_terms.top_level_attr IS NOT NULL THEN 25 ELSE 0 END
-        )`,
+      rank,
     })
     .from(sql`search_terms`)
     .where(
@@ -377,7 +382,8 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
           OR lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\'`,
     )
     .groupBy(sql`search_terms.package_id, search_terms.name`)
-    .orderBy(sql`2 DESC`)
+    // Best score first; ties by name, as the old `ORDER BY rank, pkg.name`.
+    .orderBy(desc(rank), sql`search_terms.name`)
     .limit(50);
 
   if (ranked.length === 0) return [];
