@@ -52,6 +52,19 @@ async function cmdDiscover(): Promise<void> {
       pool.query<{ hash: string }>(`SELECT hash FROM commits`),
     ]);
 
+    // With nothing imported, selectPendingForCommits has no head to anchor on
+    // and walks to the OLDEST release in the bucket: a 2017 commit whose
+    // 7-char hash GitHub can no longer resolve, so the run dies with an
+    // opaque `422 Unprocessable Entity` from resolveCommit (#15). The real
+    // cause is that the seed has not run against this database yet.
+    if (known.rows.length === 0) {
+      console.error(
+        "no commits in database — run the seed first (docs/migration-runbook.md, Phase 2)." +
+          " A fresh branch also needs `db migrate` before the seed.",
+      );
+      process.exit(1);
+    }
+
     const knownHashes = new Set(known.rows.map((r) => r.hash));
     const pending = selectPendingForCommits(releases, knownHashes, { limit });
 
