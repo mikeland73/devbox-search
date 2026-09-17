@@ -31,8 +31,8 @@ describe("pendingMigrations", () => {
   });
 
   test("only entries newer than the last applied row are pending", async () => {
-    // 0001_semver_bigint was generated at 1789581801306; staging sat there
-    // with 0002/0003 unapplied on 2026-09-17, which is the case that matters.
+    // 0001_semver_bigint was generated at 1789581801306; a database that
+    // stopped there has 0002/0003 unapplied — the shape a real catch-up has.
     const pending = await pendingMigrations(poolWith({ table: true, lastCreatedAt: "1789581801306" }));
     expect(pending).toEqual(tags.slice(2));
   });
