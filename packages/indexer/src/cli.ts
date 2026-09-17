@@ -47,24 +47,24 @@ async function cmdDiscover(): Promise<void> {
     // EVERY imported commit, not a recent window: selectPendingForCommits
     // takes the oldest unknown release first, so a hash missing from this set
     // gets re-queued forever. One row is a 40-char hash; even 100k is nothing.
-    const [releases, known] = await Promise.all([
-      listUnstableReleases(),
-      pool.query<{ hash: string }>(`SELECT hash FROM commits`),
-    ]);
+    const known = await pool.query<{ hash: string }>(`SELECT hash FROM commits`);
 
     // With nothing imported, selectPendingForCommits has no head to anchor on
     // and walks to the OLDEST release in the bucket: a 2017 commit whose
     // 7-char hash GitHub can no longer resolve, so the run dies with an
     // opaque `422 Unprocessable Entity` from resolveCommit (#15). The real
-    // cause is that the seed has not run against this database yet.
+    // cause is that the seed has not run against this database yet. Checked
+    // before listing releases so the bail-out costs no network at all.
     if (known.rows.length === 0) {
       console.error(
         "no commits in database — run the seed first (docs/migration-runbook.md, Phase 2)." +
           " A fresh branch also needs `db migrate` before the seed.",
       );
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
+    const releases = await listUnstableReleases();
     const knownHashes = new Set(known.rows.map((r) => r.hash));
     const pending = selectPendingForCommits(releases, knownHashes, { limit });
 
