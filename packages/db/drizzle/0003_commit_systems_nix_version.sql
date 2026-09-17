@@ -1,0 +1,1 @@
+ALTER TABLE "commit_systems" ADD COLUMN "nix_version" text;

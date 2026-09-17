@@ -78,7 +78,7 @@ describe("searchByPhrase batched semantics match the per-hit lookups", () => {
     expect(rows.map((r) => r.version)).toContain("1.22.0");
   });
 
-  test("all versions: every version, newest first, then system and attr_path", async () => {
+  test("all versions: every version, newest first, one row each at the lowest system", async () => {
     await seedPackage(t.db, {
       name: "go",
       versions: [
@@ -92,9 +92,7 @@ describe("searchByPhrase batched semantics match the per-hit lookups", () => {
     expect(rows.map((r) => [r.version, r.system])).toEqual([
       ["1.23rc1", "x86_64-linux"],
       ["1.22.0", "aarch64-darwin"],
-      ["1.22.0", "x86_64-linux"],
       ["1.21.0", "aarch64-darwin"],
-      ["1.21.0", "x86_64-linux"],
     ]);
   });
 });

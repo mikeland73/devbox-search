@@ -76,7 +76,13 @@ function toParam(value: unknown): unknown {
  * verbatim, in importEval's order, with COPY replaced by `stage`. Row
  * derivation is importEval's own evalRows, so its guards run here too.
  */
-async function runImport(json: unknown, commitHash: string, committedAt: Date, system: string) {
+async function runImport(
+  json: unknown,
+  commitHash: string,
+  committedAt: Date,
+  system: string,
+  nixVersion: string | null = null,
+) {
   const rows = evalRows(json, commitHash, committedAt, system);
 
   await db.exec("BEGIN");
@@ -201,7 +207,7 @@ async function runImport(json: unknown, commitHash: string, committedAt: Date, s
   const opened = await db.query(SQL.OPEN_RANGES, [system, commitSeq]);
 
   await db.exec(SQL.INSERT_SEARCH_TERMS);
-  await db.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, system]);
+  await db.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, system, nixVersion]);
   await db.exec("COMMIT");
 
   return {
@@ -372,6 +378,17 @@ describe("guards", () => {
     expect(second.commitSeq).toBe(first.commitSeq);
     expect(await rows(`SELECT count(*)::int AS n FROM commits`)).toEqual([{ n: 1 }]);
     expect(await rows(`SELECT count(*)::int AS n FROM commit_systems`)).toEqual([{ n: 2 }]);
+  });
+
+  test("records the Nix version that produced each archive, null when unknown", async () => {
+    const json = evalJson({ hello: { version: "2.12.1" } });
+    await runImport(json, HASH(1), DAY(1), "x86_64-linux", "2.35.2");
+    await runImport(json, HASH(1), DAY(1), "aarch64-linux");
+
+    expect(await rows(`SELECT system, nix_version FROM commit_systems ORDER BY system`)).toEqual([
+      { system: "aarch64-linux", nix_version: null },
+      { system: "x86_64-linux", nix_version: "2.35.2" },
+    ]);
   });
 
   test("a commit older than the head is refused", async () => {

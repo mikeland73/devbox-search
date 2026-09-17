@@ -46,9 +46,9 @@ const RESULT_COLUMNS = `"packages"."name", "versions"."version", commit_hash.has
 
 const RESULT_JOINS = `inner join "versions" on "versions"."id" = "variants"."version_id" inner join "packages" on "packages"."id" = "versions"."package_id" inner join "meta" on "meta"."id" = "variants"."meta_id" inner join commits AS commit_hash on commit_hash.seq = "variants"."commit_seq"`;
 
-/** searchByPhrase, latest: one query for every ranked hit. */
+/** searchByPhrase, latest: one query for every ranked hit, one row per package. */
 const PHRASE_LATEST = `
-select ${RESULT_COLUMNS}
+select distinct on (hits.ord) ${RESULT_COLUMNS}
 from unnest(string_to_array($1, ',')::int[]) WITH ORDINALITY AS hits(package_id, ord)
 inner join LATERAL (
   SELECT v.id AS version_id
@@ -64,16 +64,16 @@ ${RESULT_JOINS}
 order by hits.ord, "variants"."system" asc, "variants"."attr_path" asc
 limit 50`;
 
-/** searchByPhrase, all versions. */
+/** searchByPhrase, all versions: one row per package x version. */
 const PHRASE_ALL = `
-select ${RESULT_COLUMNS}
+select distinct on (hits.ord, "versions"."sort_key", "versions"."version") ${RESULT_COLUMNS}
 from unnest(string_to_array($1, ',')::int[]) WITH ORDINALITY AS hits(package_id, ord)
 inner join "versions" on "versions"."package_id" = hits.package_id
 inner join "variants" on "variants"."version_id" = "versions"."id"
 inner join "packages" on "packages"."id" = "versions"."package_id"
 inner join "meta" on "meta"."id" = "variants"."meta_id"
 inner join commits AS commit_hash on commit_hash.seq = "variants"."commit_seq"
-order by hits.ord, "versions"."sort_key" desc, "variants"."system" asc, "variants"."attr_path" asc
+order by hits.ord, "versions"."sort_key" desc, "versions"."version" asc, "variants"."system" asc, "variants"."attr_path" asc
 limit 1000`;
 
 /** nameOrAttrPath: the semi-join every name lookup is scoped by. */

@@ -361,28 +361,33 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const phrase = q.phrase!;
   const latestOnly = q.version === "latest";
 
+  // The tiered score. Note: the same expression is passed to orderBy, so the
+  // ordering cannot silently drift from what is selected (ordering by a
+  // positional ordinal once pointed at `name` instead).
+  const rank = sql<number>`
+    max(
+      CASE
+        WHEN lower(search_terms.name) = lower(${phrase}) THEN 1000
+        WHEN lower(search_terms.attr_path) = lower(${phrase}) THEN 900
+        WHEN lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 800
+        WHEN lower(search_terms.attr_path) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 700
+        ELSE 0
+      END
+      + 100 * greatest(
+          similarity(search_terms.name, ${phrase}),
+          similarity(search_terms.attr_path, ${phrase})
+        )
+      -- Top-level attributes outrank nested ones, mirroring the old
+      -- 10x FTS column weight ("python" -> python3, not
+      -- emacs28Packages.python3).
+      + CASE WHEN search_terms.top_level_attr IS NOT NULL THEN 25 ELSE 0 END
+    )`;
+
   const ranked = await db()
     .select({
       packageId: sql<number>`search_terms.package_id`,
       name: sql<string>`search_terms.name`,
-      rank: sql<number>`
-        max(
-          CASE
-            WHEN lower(search_terms.name) = lower(${phrase}) THEN 1000
-            WHEN lower(search_terms.attr_path) = lower(${phrase}) THEN 900
-            WHEN lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 800
-            WHEN lower(search_terms.attr_path) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 700
-            ELSE 0
-          END
-          + 100 * greatest(
-              similarity(search_terms.name, ${phrase}),
-              similarity(search_terms.attr_path, ${phrase})
-            )
-          -- Top-level attributes outrank nested ones, mirroring the old
-          -- 10x FTS column weight ("python" -> python3, not
-          -- emacs28Packages.python3).
-          + CASE WHEN search_terms.top_level_attr IS NOT NULL THEN 25 ELSE 0 END
-        )`,
+      rank,
     })
     .from(sql`search_terms`)
     .where(
@@ -390,7 +395,8 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
           OR lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\'`,
     )
     .groupBy(sql`search_terms.package_id, search_terms.name`)
-    .orderBy(sql`2 DESC`)
+    // Best score first; ties by name, as the old `ORDER BY rank, pkg.name`.
+    .orderBy(desc(rank), sql`search_terms.name`)
     .limit(50);
 
   if (ranked.length === 0) return [];
@@ -399,6 +405,14 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   // neon-http each query is an HTTPS round trip, and 50 hits x 3 queries was
   // most of /v2/search's latency. `hits` carries the rank order so rows come
   // back in it; within a package the ordering matches the old service.
+  //
+  // The DISTINCT ON reproduces the old queries' grouping: sqlPrefixLatestSearch
+  // `GROUP BY pkg.name` (one row per package, at its newest version) and
+  // sqlPrefixSearch `GROUP BY pkg.name, pkg.version` (one row per version).
+  // A search result is a package, not a package x system, and the caps count
+  // accordingly. Rows are ordered by system then attr_path within a version,
+  // so the surviving row is the lowest system — the row sqlite's bare-column
+  // grouping surfaced in the live service.
   const hits = sql`unnest(string_to_array(${ranked.map((h) => h.packageId).join(",")}, ',')::int[])
     WITH ORDINALITY AS hits(package_id, ord)`;
 
@@ -407,7 +421,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
     // non-broken variant (sanctioned change #3) — the choice
     // pickLatestVersionId makes, expressed as a single ordering.
     const rows = await db()
-      .select(resultColumns)
+      .selectDistinctOn([sql`hits.ord`], resultColumns)
       .from(hits)
       .innerJoin(
         sql`LATERAL (
@@ -432,14 +446,20 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   }
 
   const rows = await db()
-    .select(resultColumns)
+    .selectDistinctOn([sql`hits.ord`, versions.sortKey, versions.version], resultColumns)
     .from(hits)
     .innerJoin(versions, sql`${versions.packageId} = hits.package_id`)
     .innerJoin(variants, eq(variants.versionId, versions.id))
     .innerJoin(packages, eq(packages.id, versions.packageId))
     .innerJoin(meta, eq(meta.id, variants.metaId))
     .innerJoin(sql`commits AS commit_hash`, sql`commit_hash.seq = ${variants.commitSeq}`)
-    .orderBy(sql`hits.ord`, desc(versions.sortKey), asc(variants.system), asc(variants.attrPath))
+    .orderBy(
+      sql`hits.ord`,
+      desc(versions.sortKey),
+      asc(versions.version),
+      asc(variants.system),
+      asc(variants.attrPath),
+    )
     .limit(1000);
   return rows as ResultPackage[];
 }
