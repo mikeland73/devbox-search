@@ -62,6 +62,16 @@ describe("migration applies cleanly", () => {
     expect(sim[0]!.similarity).toBeGreaterThan(0);
   });
 
+  test("the lower() btrees behind the phrase-search prefix tier exist", async () => {
+    const idx = await rows<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes WHERE tablename = 'search_terms' AND indexdef LIKE '%btree (lower(%' ORDER BY indexname`,
+    );
+    expect(idx.map((r) => r.indexname)).toEqual([
+      "search_terms_attr_path_lower_idx",
+      "search_terms_name_lower_idx",
+    ]);
+  });
+
   test("the partial index on open ranges exists", async () => {
     const idx = await rows<{ indexdef: string }>(
       `SELECT indexdef FROM pg_indexes WHERE indexname = 'variant_ranges_open_idx'`,

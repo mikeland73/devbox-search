@@ -297,7 +297,12 @@ export const searchTerms = pgTable(
     uniqueIndex("search_terms_key").on(t.name, t.attrPath),
     index("search_terms_name_trgm_idx").using("gin", sql`${t.name} gin_trgm_ops`),
     index("search_terms_attr_path_trgm_idx").using("gin", sql`${t.attrPath} gin_trgm_ops`),
+    // Both lower() btrees serve the prefix tier of phrase search
+    // (`lower(col) LIKE 'go%'`, a range scan under C collation). Without the
+    // attr_path one, every phrase query seq-scans the table to find attribute
+    // paths starting with the phrase.
     index("search_terms_name_lower_idx").on(sql`lower(${t.name})`),
+    index("search_terms_attr_path_lower_idx").on(sql`lower(${t.attrPath})`),
   ],
 );
 

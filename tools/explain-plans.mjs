@@ -19,12 +19,11 @@
 
 import pg from "pg";
 
-const PHRASES = ["go", "python"];
+const PHRASES = ["go", "python", "hello"];
 const NAMES = ["go", "python", "python311", "hello"];
 
-const RANKED = `
-select search_terms.package_id, search_terms.name,
-  max(
+/** The tiered rank expression shared by both candidate tiers. */
+const RANK = `max(
     CASE
       WHEN lower(search_terms.name) = lower($1) THEN 1000
       WHEN lower(search_terms.attr_path) = lower($1) THEN 900
@@ -32,15 +31,41 @@ select search_terms.package_id, search_terms.name,
       WHEN lower(search_terms.attr_path) LIKE lower($2) || '%' ESCAPE '\\' THEN 700
       ELSE 0
     END
-    + 100 * greatest(similarity(search_terms.name, $1), similarity(search_terms.attr_path, $1))
+    + 100 * CASE
+        WHEN search_terms.name = search_terms.attr_path THEN similarity(search_terms.name, $1)
+        ELSE greatest(similarity(search_terms.name, $1), similarity(search_terms.attr_path, $1))
+      END
     + CASE WHEN search_terms.top_level_attr IS NOT NULL THEN 25 ELSE 0 END
-  ) AS rank
-from search_terms
-where search_terms.name % $1 OR search_terms.attr_path % $1
-   OR lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
-group by search_terms.package_id, search_terms.name
-order by rank DESC, search_terms.name
-limit 50`;
+  )`;
+
+const PREFIX_MATCH = `(lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
+   OR lower(search_terms.attr_path) LIKE lower($2) || '%' ESCAPE '\\')`;
+
+const tier = (where) => `
+  SELECT search_terms.package_id, search_terms.name, ${RANK} AS rank
+  FROM search_terms
+  WHERE ${where}
+  GROUP BY search_terms.package_id, search_terms.name
+  ORDER BY rank DESC, search_terms.name
+  LIMIT 50`;
+
+/**
+ * searchByPhrase, ranking: the prefix tier, then — only if it is not already
+ * full — the trigram-similarity tier.
+ */
+const RANKED = `
+WITH prefix AS (${tier(PREFIX_MATCH)}),
+fuzzy AS (${tier(`(SELECT count(*) FROM prefix) < 50
+    AND (search_terms.name % $1 OR search_terms.attr_path % $1)
+    AND NOT ${PREFIX_MATCH}`)})
+SELECT package_id
+FROM (
+  SELECT package_id, max(rank) AS rank, min(name) AS name
+  FROM (SELECT * FROM prefix UNION ALL SELECT * FROM fuzzy) AS tiers
+  GROUP BY package_id
+) AS ranked
+ORDER BY rank DESC, name
+LIMIT 50`;
 
 const RESULT_COLUMNS = `"packages"."name", "versions"."version", commit_hash.hash, commit_hash.committed_at, "variants"."store_hash", "variants"."store_name", "versions"."version", "variants"."meta_name", "variants"."meta_version", "variants"."attr_path", "variants"."system", "variants"."program", "meta"."summary", "meta"."description", "meta"."homepage", "meta"."license", "variants"."broken", "variants"."insecure", "meta"."platforms", "variants"."outputs"`;
 
@@ -153,11 +178,17 @@ print("  `Seq Scan on variants` here means the name/attr_path predicate has beco
 print("  across two tables again (#26: ~4 s per lookup).");
 print("- **Batched fetch** must be one `Nested Loop` over `hits` with an index scan on");
 print("  `versions (package_id, ...)` per hit — never one query per hit.");
-print("- **Ranked terms** uses a `BitmapOr` of the trigram indexes for short phrases (`go`).");
-print("  Broad phrases (`python` matches every `python3Packages.*` attr_path by similarity)");
-print("  fall back to a parallel seq scan of `search_terms` and cost ~0.8 s; that is the");
-print("  remaining search latency, and a semantic question (whether attr_path similarity");
-print("  should apply to nested attributes at all), not a plan regression.");
+print("- **Ranked terms** is two tiers. The `prefix` CTE's filter must be the two `LIKE`s");
+print("  only — a `BitmapOr` of `search_terms_name_lower_idx` and `search_terms_attr_path_lower_idx`");
+print("  for narrow phrases (`go`), a plain seq scan when a quarter of the table matches");
+print("  (`python`, ~90 ms). The `fuzzy` arm must sit under a `One-Time Filter` and show");
+print("  `(never executed)` whenever the prefix tier is full (`go`, `python`); it runs for");
+print("  `hello`. A `%` in the prefix arm's filter, or a fuzzy arm that ran for `python`, is a");
+print("  regression: `%` is cheap to index but every GIN candidate is rechecked with");
+print("  similarity(), and `python` has 70k of them (every `pythonXYPackages.*` attribute is");
+print("  a name-prefix match) — ~1.1 s of CPU when both tiers were one OR'd WHERE. What");
+print("  remains for broad prefixes is similarity() over the prefix rows themselves (~0.4 s");
+print("  for `python`); making that cheaper means changing how that tier is ranked, not the plan.");
 print();
 
 print("## Phrase search (/v2/search, /v1/search, /search)");

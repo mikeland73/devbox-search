@@ -101,6 +101,16 @@ describe("schema invariants", () => {
     expect(names).toContain("search_terms_name_trgm_idx");
     expect(names).toContain("search_terms_attr_path_trgm_idx");
   });
+
+  test("search_terms has a lower() btree on both name and attr_path (the phrase-search prefix tier)", () => {
+    const names = getTableConfig(searchTerms).indexes.map((i) => i.config.name);
+    expect(names).toContain("search_terms_name_lower_idx");
+    expect(names).toContain("search_terms_attr_path_lower_idx");
+    const migration = readFileSync(join(MIGRATIONS_FOLDER, "0004_search_terms_attr_path_lower_idx.sql"), "utf8");
+    expect(migration).toContain(
+      `CREATE INDEX "search_terms_attr_path_lower_idx" ON "search_terms" USING btree (lower("attr_path"))`,
+    );
+  });
 });
 
 describe("bytea custom type", () => {

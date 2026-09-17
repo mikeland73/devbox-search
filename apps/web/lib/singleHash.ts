@@ -15,7 +15,7 @@
  */
 
 import { sql } from "drizzle-orm";
-import { db, type ResultPackage } from "./search";
+import { db, rowsOf, type ResultPackage } from "./search";
 
 interface RangeRow {
   system: string;
@@ -23,16 +23,6 @@ interface RangeRow {
   first_seq: number;
   last_seq: number | null;
   seeded: boolean;
-}
-
-/**
- * Rows of a raw `execute` result. Drivers disagree on the container:
- * neon-http returns an object with `rows`, PGlite (tests) too, and some
- * drivers return the array directly.
- */
-export function rowsOf<T>(result: unknown): T[] {
-  if (Array.isArray(result)) return result as T[];
-  return (result as { rows: T[] }).rows;
 }
 
 /**

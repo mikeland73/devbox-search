@@ -85,6 +85,16 @@ export function useDb(override: SearchDb | undefined): void {
   cached = override;
 }
 
+/**
+ * Rows of a raw `execute` result. Drivers disagree on the container:
+ * neon-http returns an object with `rows`, PGlite (tests) too, and some
+ * drivers return the array directly.
+ */
+export function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  return (result as { rows: T[] }).rows;
+}
+
 /** Normalizes a query the same way the Go service did before hitting the DB. */
 export function normalizeQuery(q: SearchQuery): SearchQuery {
   const out: SearchQuery = {};
@@ -353,6 +363,9 @@ function semverBounds(constraint: Constraint): SQL {
   return clauses.length === 0 ? sql`true` : and(...clauses)!;
 }
 
+/** Phrase search returns at most this many packages. */
+const PHRASE_LIMIT = 50;
+
 /**
  * Full-text search over names and attribute paths.
  *
@@ -364,44 +377,83 @@ function semverBounds(constraint: Constraint): SQL {
 export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const phrase = q.phrase!;
   const latestOnly = q.version === "latest";
+  const prefix = sql`lower(${escapeLike(phrase)}) || '%'`;
 
-  // The tiered score. Note: the same expression is passed to orderBy, so the
-  // ordering cannot silently drift from what is selected (ordering by a
-  // positional ordinal once pointed at `name` instead).
+  // The tiered score, selected as `rank` and ordered by that alias so the
+  // ordering cannot drift from what is selected (ordering by a positional
+  // ordinal once pointed at `name` instead).
+  //
+  // similarity() is the expensive part of this query (it re-trigrams both
+  // strings on every call), and name = attr_path for all but a few hundred
+  // rows, so call it once when the two are the same string.
   const rank = sql<number>`
     max(
       CASE
         WHEN lower(search_terms.name) = lower(${phrase}) THEN 1000
         WHEN lower(search_terms.attr_path) = lower(${phrase}) THEN 900
-        WHEN lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 800
-        WHEN lower(search_terms.attr_path) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\' THEN 700
+        WHEN lower(search_terms.name) LIKE ${prefix} ESCAPE '\\' THEN 800
+        WHEN lower(search_terms.attr_path) LIKE ${prefix} ESCAPE '\\' THEN 700
         ELSE 0
       END
-      + 100 * greatest(
-          similarity(search_terms.name, ${phrase}),
-          similarity(search_terms.attr_path, ${phrase})
-        )
+      + 100 * CASE
+          WHEN search_terms.name = search_terms.attr_path THEN similarity(search_terms.name, ${phrase})
+          ELSE greatest(
+            similarity(search_terms.name, ${phrase}),
+            similarity(search_terms.attr_path, ${phrase})
+          )
+        END
       -- Top-level attributes outrank nested ones, mirroring the old
       -- 10x FTS column weight ("python" -> python3, not
       -- emacs28Packages.python3).
       + CASE WHEN search_terms.top_level_attr IS NOT NULL THEN 25 ELSE 0 END
     )`;
 
-  const ranked = await db()
-    .select({
-      packageId: sql<number>`search_terms.package_id`,
-      name: sql<string>`search_terms.name`,
-      rank,
-    })
-    .from(sql`search_terms`)
-    .where(
-      sql`search_terms.name % ${phrase} OR search_terms.attr_path % ${phrase}
-          OR lower(search_terms.name) LIKE lower(${escapeLike(phrase)}) || '%' ESCAPE '\\'`,
-    )
-    .groupBy(sql`search_terms.package_id, search_terms.name`)
-    // Best score first; ties by name, as the old `ORDER BY rank, pkg.name`.
-    .orderBy(desc(rank), sql`search_terms.name`)
-    .limit(50);
+  // Two candidate tiers, and the second is skipped when the first is full.
+  //
+  // Every exact/prefix match scores at least 700; every similarity-only
+  // match at most 125. So once the prefix tier alone yields PHRASE_LIMIT
+  // packages, no similarity-only row can make the cut, and the `%` scan can
+  // be skipped: `(SELECT count(*) FROM prefix) < N` is a pseudo-constant
+  // that the planner turns into a One-Time Filter over the fuzzy arm.
+  //
+  // This matters because `%` is expensive to evaluate, not to index. The
+  // GIN trigram index is lossy, so every candidate is rechecked with
+  // similarity(), and a broad prefix like "python" has 70k candidates
+  // (every pythonXYPackages.* attribute) — 1.1 s of CPU when the two tiers
+  // were one OR'd WHERE clause. The prefix tier itself is a BitmapOr of the
+  // two lower() btrees. See docs/query-plans.md.
+  const prefixMatch = sql`(
+    lower(search_terms.name) LIKE ${prefix} ESCAPE '\\'
+    OR lower(search_terms.attr_path) LIKE ${prefix} ESCAPE '\\'
+  )`;
+  const tier = (where: SQL) => sql`
+    SELECT search_terms.package_id, search_terms.name, ${rank} AS rank
+    FROM search_terms
+    WHERE ${where}
+    GROUP BY search_terms.package_id, search_terms.name
+    ORDER BY rank DESC, search_terms.name
+    LIMIT ${PHRASE_LIMIT}`;
+  const result = await db().execute(sql`
+    WITH prefix AS (${tier(prefixMatch)}),
+    fuzzy AS (${tier(sql`
+      (SELECT count(*) FROM prefix) < ${PHRASE_LIMIT}
+      AND (search_terms.name % ${phrase} OR search_terms.attr_path % ${phrase})
+      AND NOT ${prefixMatch}`)})
+    -- The tiers are grouped separately, and a package with several attribute
+    -- paths can have one in each (name not a prefix match; one attr_path a
+    -- prefix match, another only similar). Group once more so a package is
+    -- one hit, as the old single GROUP BY guaranteed; name is constant per
+    -- package. At most 2 x PHRASE_LIMIT rows reach this point.
+    SELECT package_id
+    FROM (
+      SELECT package_id, max(rank) AS rank, min(name) AS name
+      FROM (SELECT * FROM prefix UNION ALL SELECT * FROM fuzzy) AS tiers
+      GROUP BY package_id
+    ) AS ranked
+    -- Best score first; ties by name, as the old "ORDER BY rank, pkg.name".
+    ORDER BY rank DESC, name
+    LIMIT ${PHRASE_LIMIT}`);
+  const ranked = rowsOf<{ package_id: number }>(result);
 
   if (ranked.length === 0) return [];
 
@@ -417,7 +469,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   // accordingly. Rows are ordered by system then attr_path within a version,
   // so the surviving row is the lowest system — the row sqlite's bare-column
   // grouping surfaced in the live service.
-  const hits = sql`unnest(string_to_array(${ranked.map((h) => h.packageId).join(",")}, ',')::int[])
+  const hits = sql`unnest(string_to_array(${ranked.map((h) => h.package_id).join(",")}, ',')::int[])
     WITH ORDINALITY AS hits(package_id, ord)`;
 
   if (latestOnly) {
@@ -445,7 +497,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
       .innerJoin(meta, eq(meta.id, variants.metaId))
       .innerJoin(commits, eq(commits.seq, variants.commitSeq))
       .orderBy(sql`hits.ord`, asc(variants.system), asc(variants.attrPath))
-      .limit(50);
+      .limit(PHRASE_LIMIT);
     return rows as ResultPackage[];
   }
 

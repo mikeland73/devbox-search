@@ -1,0 +1,1 @@
+CREATE INDEX "search_terms_attr_path_lower_idx" ON "search_terms" USING btree (lower("attr_path"));
