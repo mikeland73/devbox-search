@@ -15,25 +15,30 @@ code: accounts, credentials, decisions, and the order to do them in.
   `DEVBOX_SEARCH_HOST` (or a later CLI release). API byte-compatibility still
   matters — people will point current CLIs at the new host — so the shadow-diff
   gate stays exactly as strict.
-- **Runners (revised 2026-09-16):** neither of the original plans is available
-  to a personal account. GitHub's larger runners (`ubuntu-latest-4-cores`)
-  need a Team/Enterprise org — on a personal private repo the jobs **queue
-  forever** rather than failing, so a stuck `queued` eval is this, not a
-  capacity blip. Blacksmith also doesn't support personal accounts. The
-  order of preference now:
-  1. ~~**Standard free `ubuntu-latest` (2 vCPU / 7 GB) plus swap**~~ —
-     **tested 2026-09-16, does not fit** (see 0.2). And it wouldn't have been
-     free anyway: 4 evals/day blows past the Pro plan's 3,000 included minutes.
-  2. **Make the repo public** — free 4-vCPU/16 GB runners, unlimited minutes.
-     `index.yml` already switches on `repository_visibility`. History was
-     scanned 2026-09-16 and is clean; the Claude workflows are gated to the
-     owner so strangers can't spend the OAuth token. Downside: the half-built
-     migration is visible.
-  3. **Vercel Sandbox** (Pro: 8 vCPU / 16 GB, 24 h sessions, ~$0.47 per
-     eval-hour → ~$36–92/mo net of the $20 credit). Fits only if peak RSS is
-     comfortably under 16 GB with no swap. Would need the eval to run detached
-     and `import` to read from R2 instead of workflow artifacts.
-  4. **Self-hosted runner** (Hetzner ~€6/mo) — the private-repo fallback.
+- **Runners (decided 2026-09-16): the eval runs in a separate public repo,
+  `mikeland73/devbox-search-indexer`.** Nothing else was available to a
+  personal account:
+  - GitHub's larger runners (`ubuntu-latest-4-cores`) need a Team/Enterprise
+    org — on a personal private repo the jobs **queue forever** rather than
+    failing, so a stuck `queued` job is this, not a capacity blip. Blacksmith
+    doesn't support personal accounts either.
+  - The private repo's free `ubuntu-latest` (2 vCPU / 7.8 GB) **does not fit
+    the eval even with swap** — tested 2026-09-16, `nix-env` thrashed for 36
+    min and GitHub killed the VM (see 0.2). It wouldn't have been free anyway
+    at the Pro plan's 3,000 included minutes.
+  - Vercel Sandbox (16 GB, no swap) was rejected once peak RSS measured
+    14.1–14.6 GB — no headroom.
+  - Public repos get 4-vCPU/16 GB runners and unlimited minutes. The eval is
+    only a `nix-env` invocation, so it lives in a public repo with **no
+    ported code**: one workflow (`eval.yml`), a README, MIT. It archives each
+    (commit, system) eval to R2 at `{system}/{unix-ts}-{hash}.json.gz`.
+    `index.yml` here dispatches it via `INDEXER_DISPATCH_TOKEN` (fine-grained
+    PAT, Actions read/write on that repo only) and imports from R2.
+  - **This repo stays private.** `packages/core` is a faithful port of
+    Jetify-internal Go files and this runbook discusses the
+    `search.devbox.sh` shutdown; neither belongs on a public repo. History
+    was scanned clean on 2026-09-16 regardless, and the Claude workflows in
+    both repos are gated to `repository_owner`.
 
 ---
 
@@ -109,32 +114,32 @@ credentials for a local seed — don't copy them out of the Neon console.
 ## Phase 0 — unblock (do these first)
 
 These are independent of each other and of PR review. Everything else waits on
-them. 0.3 and 0.4 are **done**; the runner question (0.1, 0.2) is the only
-thing outstanding and it blocks Phase 4's first real eval.
+them. **All four are done** as of 2026-09-16; 0.1/0.2 are kept for the record
+of what was measured and why the eval ended up in a second repo.
 
-### 0.1 Pick a runner — ~~Blacksmith~~ (not available to personal accounts)
+### 0.1 Pick a runner — **done: public `devbox-search-indexer` repo**
 
 Blacksmith is out (no personal-account support, confirmed 2026-09-16), as are
-GitHub larger runners. See the revised runner decision at the top. What to do
-depends on 0.2:
+GitHub larger runners, and 0.2 ruled out the private runner. See the runner
+decision at the top for the reasoning.
 
-- [ ] If the eval **fits on `ubuntu-latest` + swap**: change `index.yml`'s
-      `eval.runs-on` to plain `ubuntu-latest` and stay private. Expect each
-      eval to be slow (2 vCPU, heavy swapping) — check it lands inside the
-      180-minute job timeout with margin.
-- [ ] If it doesn't: make the repo public (`gh repo edit --visibility public`
-      **after** PR #12 merges, so the owner-gated Claude workflows are live on
-      `main` first). `index.yml` needs no change.
-- [ ] Only if neither works: Vercel Sandbox or a Hetzner self-hosted runner.
+- [x] ~~Fit on `ubuntu-latest` + swap and stay private~~ — does not fit (0.2)
+- [x] ~~Make this repo public~~ — rejected; ported Jetify code stays private
+- [x] Eval moved to a standalone workflow in public `mikeland73/devbox-search-indexer`
+      (2026-09-16). Secrets set there: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+      `R2_ENDPOINT`, `R2_BUCKET`. Secret set here: `INDEXER_DISPATCH_TOKEN`.
+- [x] `index.yml` rewritten to fetch from R2 and dispatch cross-repo (#7 follow-ups, #13)
 
-The swapfile step now sizes itself from free space; don't hardcode a path or
-size again — see "Things the runner image taught us" below.
+The swapfile step (now in the public repo's `eval.yml`) sizes itself from
+free space; don't hardcode a path or size again — see "Things learned the
+hard way" below.
 
-### 0.2 Prove the eval fits in memory
+### 0.2 Prove the eval fits in memory — **done**
 
-`eval-experiment.yml` takes the runner label as a `workflow_dispatch` input.
-Dispatch it from the branch that has the adaptive swapfile step (PR #12, or
-`main` once merged).
+The probe workflow (`eval-experiment.yml`) was removed (#18, PR #32) once its numbers
+were recorded here; on this private repo it could only ever land on the
+runner where the eval doesn't fit. A one-off manual eval today is `eval.yml`
+in the public repo, dispatched with a single system.
 
 - [x] Run **eval-experiment** on `ubuntu-latest` — run 35136891482,
       `x86_64-linux` at `6b5e5b7a` (2026-09-16); earlier attempts died on the
@@ -143,14 +148,20 @@ Dispatch it from the branch that has the adaptive swapfile step (PR #12, or
       disk → 8.4 GB swap total. `nix-env` ran 36 min, then GitHub killed the
       VM (`exit 143`, "runner has received a shutdown signal") — the
       swap-thrash signature, not the 180-min timeout. Peak RSS unrecorded
-      but >7.8 GB and not sustainable on 8 GB of swap. Option 1 is out.
-- [ ] Decide 0.1 from what's left: public repo (16 GB + swap) is the only
-      free option; Vercel Sandbox's 16 GB with no swap is risky given the
-      eval clearly needs well over 8 GB.
+      but >7.8 GB and not sustainable on 8 GB of swap.
+- [x] Decided 0.1: public-repo runner (16 GB + swap). Vercel Sandbox's 16 GB
+      with no swap would have been within a few hundred MB of peak RSS.
+- [x] **Measured on the public 4-vCPU/16 GB runner** (devbox-search-indexer
+      run 35143837821, `6b5e5b7a`): wall **2:19 / 3:12 / 3:49** for
+      aarch64-darwin / aarch64-linux / x86_64-linux; **~4.5 min per job**
+      including the Nix install; **peak RSS 14.1–14.6 GB on a 15 GB runner**.
+      The adaptive swapfile is load-bearing, and `eval.yml` fails the run if
+      headroom drops under 500 MB (devbox-search-indexer #2) so growth in
+      nixpkgs shows up as a red run rather than a slow one.
 
-If it OOMs even with swap, the ordered fallbacks are: make the repo public
-(16 GB + swap), `nix-eval-jobs --workers 2 --max-memory-size 6000` (needs an
-output adapter), Vercel Sandbox, then a self-hosted runner.
+If the eval ever stops fitting, the ordered fallbacks are:
+`nix-eval-jobs --workers 2 --max-memory-size 6000` (needs an output adapter),
+then a self-hosted runner (Hetzner ~€6/mo).
 
 ### 0.3 Create the Neon project — **done**
 
@@ -286,8 +297,11 @@ DEVBOX_SEARCH_HOST=https://<preview-url> devbox add python@3.11 hello go@1.22
 ```
 
 - [x] Merge PR #6
-- [ ] Bump prod compute, seed the prod branch (same command, prod direct URL),
-      drop compute back
+- [ ] Seed the prod branch: **`db migrate` first** (prod has not had
+      `0001`–`0003` applied; the seed fails without `0001_semver_bigint` and
+      the importer writes `commit_systems.nix_version` from `0003`), then the
+      same seed command with the prod direct URL. No compute bump needed —
+      staging seeded in ~10 min on default compute.
 - [ ] Promote to Production. `DATABASE_URL` for the Production environment
       already points at Neon `main`, and git is connected, so a push to `main`
       does it. `vercel deploy --prod` forces one without a commit.
@@ -320,25 +334,63 @@ required for it to be useful.
   phase. Pull it with `vercel env pull` rather than copying it from the
   console.
 
-- [ ] Apply the `runs-on` decision from 0.1
+- [x] ~~Apply the `runs-on` decision from 0.1~~ — moot: the eval left this
+      repo. `index.yml` runs entirely on standard runners.
 - [x] Merge PR #7
 - [x] Point the workflow at **staging** — `DATABASE_URL_DIRECT` is the
-      staging direct URL (set 2026-09-16). `discover` now works end to end:
+      staging direct URL (set 2026-09-16). `discover` works end to end:
       run 35133999914 picked `6b5e5b7a` (2026-08-13), the first release after
-      the seed head, exactly as designed. The eval jobs are what's blocked.
-- [ ] Soak for ~1 week once eval runs
+      the seed head, exactly as designed.
+- [x] **The daily loop is live on staging** (2026-09-16). seq 2752
+      (`6b5e5b7a`) imported on all three systems from public-repo archives.
+- [x] **Backlog cleared** (2026-09-17, #20): the seed ended 2026-08-12 and 42
+      releases had accumulated. Seven manual runs at `limit=10–15` took
+      staging from seq 2753 to **2795 = `c7def046`** (nixpkgs-26.11pre1073483),
+      the nixpkgs-unstable head at the time. All 42 evals succeeded; run 2
+      surfaced #30 (`stage_versions` still int4). The cron's `limit=4` is
+      plenty from here.
+- [ ] Soak for ~1 week (started 2026-09-17)
 
   Daily sanity checks:
-  - new commits appear and `commit_systems` fills in for all 4 systems
+  - new commits appear and `commit_systems` fills in for all **3** systems
+    (x86_64-linux, aarch64-linux, aarch64-darwin — see "x86_64-darwin" below)
   - `commit_systems.nix_version` stays at the pinned Nix (2.35.2; the eval
     workflow pins `nix-package-url`). A change here without a deliberate
     bump in `devbox-search-indexer` is the first suspect for odd counts (#19)
   - ranges open and close in plausible numbers
-  - changed variants per day is **low tens of thousands** — millions would mean
-    content hashes disagree with the seed, i.e. the importer and seed are
-    hashing differently
+  - changed variants per commit is **~1,500–1,800 per system** (about 1–1.5%
+    of packages). ~75k per commit means stubs got through (#19/#21);
+    millions would mean content hashes disagree with the seed, i.e. the
+    importer and seed are hashing differently
 
 - [ ] Switch to **prod** and keep shadow-diffing daily
+
+**How a day's indexing works.** `index.yml` (header comment has the exact
+ordering) discovers releases newer than the DB head from the nix-releases
+bucket, dispatches `eval.yml` in the public repo for any (commit, system) not
+yet in R2, and imports whatever is archived. `commit_systems` records which
+pairs landed; `discover --systems` re-lists a commit missing one. Public-repo
+runs are at
+https://github.com/mikeland73/devbox-search-indexer/actions/workflows/eval.yml.
+
+**Catching up a backlog** (more than a handful of releases pending):
+
+```sh
+gh workflow run index.yml -f limit=12
+```
+
+- `discover --limit` counts *all* pending commits, archived-but-unimported
+  ones included, so size each run as *(archived awaiting import) + ~8*, cap
+  ~15 without raising the import job's timeout.
+- Import is the bottleneck (~2 min per commit for 3 systems); evals are
+  ~4.5 min per job and the public repo runs 20 jobs concurrently.
+- Let the dispatched evals finish before the next run, or the same commits
+  are dispatched again (harmless — same key in R2 — but wasted).
+
+**Reading `commits.committed_at`.** It is the **nixpkgs commit date**, not
+when the row was imported. A head at seq 2795 dated 2026-09-14 on 09-17 is
+"caught up to the newest release", not "three days behind" — this confused a
+status check on 2026-09-17. Import time is `commit_systems.imported_at`.
 
 ---
 
@@ -353,10 +405,10 @@ required for it to be useful.
 
 ---
 
-## Things learned the hard way (2026-09-16)
+## Things learned the hard way (2026-09-16/17)
 
-Debugging the first 35 failed `index` runs surfaced these. Each one either
-produced a misleading error or no error at all.
+Debugging the first 35 failed `index` runs, and then the first real imports,
+surfaced these. Each one either produced a misleading error or no error at all.
 
 **The workflow, in the order things failed:**
 
@@ -368,8 +420,8 @@ produced a misleading error or no error at all.
 - **`discover` on an empty database walks to the beginning of time.** With no
   imported commits, `headCommitCount` is 0 and it picks the *oldest* release
   in the nix-releases bucket (a 2017 commit whose 7-char hash GitHub can't
-  resolve → `422`). The seed must run first. Optional hardening: bail with
-  "no commits in database — run the seed first".
+  resolve → `422`). The seed must run first. #15 (PR #33) makes it bail with
+  "no commits in database — run the seed first" instead.
 - **`import` with zero artifacts crashed.** `download-artifact` doesn't
   create the target dir when nothing matched, and `readdirSync` threw
   `ENOENT` — defeating the `if: always()` "import whatever succeeded" design.
@@ -382,6 +434,36 @@ produced a misleading error or no error at all.
   disk, so a blind 16 GB fallocate filled `/` and killed the runner with
   `No space left on device` from its *own* diag log. The swapfile step now
   sizes itself from `df`.
+- **nixpkgs 26.11 dropped `x86_64-darwin`.** `nix-env` errors out evaluating
+  it, so it was removed from `SYSTEMS` in `index.yml` and rejected up front
+  by `eval.yml` (#12/#13, devbox-search-indexer #4). The seed still holds
+  x86_64-darwin variants for all 2,751 historical commits with their ranges
+  open; they never advance past seq 2751. What to do about that is #17.
+  **`i686-linux` is in the same state** — seeded through seq 2751, never in
+  the indexer's system list — and whatever #17 decides should cover both.
+- **A Linux eval is ~575 MB of JSON**, past V8's 536 MB string cap, so
+  `JSON.parse(readFileSync(...))` throws `Cannot create a string longer than
+  0x1fffffe8 characters`. The importer stream-parses with `stream-json` (#13).
+- **A commit with one system imported looked done.** `discover` only compared
+  hashes, so a day where two of three evals failed was never revisited.
+  `commit_systems` + `discover --systems` re-list a known commit missing a
+  system (#13).
+
+**The eval output:**
+
+- **Newer Nix lists `meta.broken` packages as stubs.** Nix ≥ 2.2x emits a
+  package whose derivation refuses to evaluate (broken without `allowBroken`,
+  unsupported system) with only `name`/`pname`/`version` — no outputs, no
+  meta. The Nix behind the seed's compact DB dropped those, so the ported
+  decoder had never seen one. The first two real imports (seq 2752/2753) each
+  wrote **~75k phantom variants and ~11k fake packages** (`haskellPackages.*`,
+  `rPackages.*`) with `broken=false`. `decodeEvalJson` now skips anything
+  without a store path (#19), `importEval` refuses an eval containing one, and
+  `variants.store_hash` has a `CHECK (<> '')` (#21, migration `0002`).
+  **Two manual staging cleanups were needed (2026-09-16 and 2026-09-17)**
+  because the cron ran once more with the old decoder between the fix
+  landing and the cleanup — if the decoder changes again, pause the cron
+  first. Also why `nix_version` is recorded per import (#22).
 
 **The seed:**
 
@@ -389,10 +471,15 @@ produced a misleading error or no error at all.
   strict-semver versions with a date-stamped component (`3.1.20220119140128`,
   widest 14 digits) that overflow int4; `parseSemver` accepts up to 2^53.
   Migration `0001_semver_bigint`. **Prod needs `db migrate` before its seed.**
+  The importer's temp `stage_versions` table was missed and stayed `integer`
+  until #30 (first real hit: `8b7dc2ca` with `0.1.20260720092025`, during
+  the #20 catch-up). Any new temp/staging DDL must mirror the real types.
 - **`commit_systems.nix_version`** (migration `0003_commit_systems_nix_version`,
   #22) records which Nix produced each imported archive. **Staging needs
-  `db migrate` before the next daily run**; prod gets it with the rest before
-  its seed.
+  `db migrate` before the next daily run** — as of 2026-09-17 evening staging
+  is at `0001` with `0002`/`0003` unapplied, and #23 is on `main`, so the
+  05:00 UTC import will fail on the missing column until that happens. Prod
+  gets it with the rest before its seed.
 - **The PGlite test suites had `0000_init.sql` hardcoded**, so a second
   migration would never have been tested. They now apply the journal.
 - **Migration `0002_variants_store_hash_check`** (#21): `CHECK (store_hash
@@ -439,10 +526,10 @@ produced a misleading error or no error at all.
 |---|---|
 | Neon Launch | ~$5–22 (storage ~$1.40, compute varies with CDN hit rate) — billed through Vercel, not a separate Neon account |
 | Vercel | $0 incremental (already paid) |
-| Eval runners | depends on 0.1: **$0** on `ubuntu-latest` if it fits inside the Pro plan's 3,000 included minutes (it won't — 4 evals × ~2 h daily ≈ 14,000 min → ~$90/mo at $0.008/min), **$0** if the repo is public, ~$36–92 on Vercel Sandbox, ~€6 self-hosted |
-| GitHub standard runners (discover/import) | ~$5–15, largely inside the Pro plan's free minutes |
-| R2 eval archive | $0 (free 10 GB) |
-| **Total** | **~$5–22 public; ~$45–115 private** |
+| Eval runners | **$0** — public `devbox-search-indexer` repo, unlimited minutes (~14 job-minutes per commit) |
+| GitHub standard runners (discover/import, this repo) | **$0** — ~15–25 min/day (more once #14 waits for evals), well inside the Pro plan's 3,000 included minutes |
+| R2 eval archive | $0 (free 10 GB ≈ 3–5 years of archives) |
+| **Total** | **~$5–22/mo**, all Neon |
 
 The GitHub Actions **budget** matters as much as the plan: a $0 Actions budget
 with "stop usage" on silently prevents any paid-minute job from being
@@ -450,7 +537,7 @@ scheduled — it queues forever, no error. It was $0 until 2026-09-16 (now $50).
 Already-queued jobs are not re-evaluated when the budget changes; cancel and
 re-trigger.
 
-Making the repo public is the cheapest path by a wide margin. History was
-scanned clean on 2026-09-16 (all remote branches; the only hits were in local
-Conductor checkpoint refs that never reach GitHub). Once PR #12 merges, the
-Claude workflows are owner-gated and it's safe to flip.
+This repo stays private (see the runner decision at the top). If that ever
+changes: history was scanned clean on 2026-09-16 (all remote branches; the
+only hits were in local Conductor checkpoint refs that never reach GitHub) and
+the Claude workflows are already owner-gated.
