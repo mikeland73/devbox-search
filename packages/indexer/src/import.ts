@@ -40,6 +40,12 @@ export interface ImportOptions {
   commitHash: string;
   committedAt: Date;
   system: string;
+  /**
+   * `nix --version` of the Nix that produced the eval, when the archive
+   * carried it (R2 object metadata written by the eval workflow). Recorded on
+   * commit_systems so an output-shape change can be traced to a Nix upgrade.
+   */
+  nixVersion?: string | null;
   connectionString?: string;
   onProgress?: (message: string) => void;
 }
@@ -272,7 +278,7 @@ export async function importEval(options: ImportOptions): Promise<ImportResult> 
     // ---------------------------------------------------------------------
     await client.query(SQL.INSERT_SEARCH_TERMS);
 
-    await client.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, options.system]);
+    await client.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, options.system, options.nixVersion ?? null]);
 
     await client.query("COMMIT");
     log(

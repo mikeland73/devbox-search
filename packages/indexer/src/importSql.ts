@@ -280,6 +280,6 @@ export const INSERT_SEARCH_TERMS = `
 
 /** $1 commit seq, $2 system. */
 export const INSERT_COMMIT_SYSTEM = `
-  INSERT INTO commit_systems (commit_seq, system) VALUES ($1, $2)
+  INSERT INTO commit_systems (commit_seq, system, nix_version) VALUES ($1, $2, $3)
   ON CONFLICT DO NOTHING
 `;

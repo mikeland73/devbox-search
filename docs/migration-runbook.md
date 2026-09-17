@@ -330,6 +330,9 @@ required for it to be useful.
 
   Daily sanity checks:
   - new commits appear and `commit_systems` fills in for all 4 systems
+  - `commit_systems.nix_version` stays at the pinned Nix (2.35.2; the eval
+    workflow pins `nix-package-url`). A change here without a deliberate
+    bump in `devbox-search-indexer` is the first suspect for odd counts (#19)
   - ranges open and close in plausible numbers
   - changed variants per day is **low tens of thousands** — millions would mean
     content hashes disagree with the seed, i.e. the importer and seed are
@@ -386,6 +389,10 @@ produced a misleading error or no error at all.
   strict-semver versions with a date-stamped component (`3.1.20220119140128`,
   widest 14 digits) that overflow int4; `parseSemver` accepts up to 2^53.
   Migration `0001_semver_bigint`. **Prod needs `db migrate` before its seed.**
+- **`commit_systems.nix_version`** (migration `0002_commit_systems_nix_version`,
+  #22) records which Nix produced each imported archive. **Staging needs
+  `db migrate` before the next daily run**; prod gets it with the rest before
+  its seed.
 - **The PGlite test suites had `0000_init.sql` hardcoded**, so a second
   migration would never have been tested. They now apply the journal.
 - The staging seed took ~10 minutes on default Neon compute. The "bump

@@ -9,7 +9,7 @@
  *   cli.js status                 a markdown summary of the index
  */
 
-import { appendFileSync, existsSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createImportClient } from "@devbox-search/db";
 import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits, withBackfill } from "./discover.js";
@@ -100,10 +100,13 @@ async function cmdEval(): Promise<void> {
 /**
  * Imports every eval archive under --dir. Artifact directories are named
  * eval-{system}-{commit}, which is where the system and commit come from.
+ * A `nix-version` file beside the archive (the fetch step copies it out of
+ * the R2 object's metadata) is recorded on commit_systems; older archives
+ * have none.
  */
 async function cmdImport(): Promise<void> {
   const dir = requireArg("dir");
-  const entries: Array<{ path: string; system: string; commit: string }> = [];
+  const entries: Array<{ path: string; system: string; commit: string; nixVersion: string | null }> = [];
 
   // download-artifact does not create --dir when no artifact matched (every
   // eval failed, or was cancelled). That is the "import whatever succeeded"
@@ -112,9 +115,11 @@ async function cmdImport(): Promise<void> {
     const m = /^eval-([0-9a-z_-]+)-([0-9a-f]{40})$/.exec(name);
     if (m === null) continue;
     const inner = join(dir, name);
+    const versionFile = join(inner, "nix-version");
+    const nixVersion = existsSync(versionFile) ? readFileSync(versionFile, "utf8").trim() || null : null;
     for (const file of readdirSync(inner)) {
       if (file.endsWith(".json.gz")) {
-        entries.push({ path: join(inner, file), system: m[1]!, commit: m[2]! });
+        entries.push({ path: join(inner, file), system: m[1]!, commit: m[2]!, nixVersion });
       }
     }
   }
@@ -139,7 +144,7 @@ async function cmdImport(): Promise<void> {
 
   let failures = 0;
   for (const entry of entries) {
-    console.log(`\n=== ${basename(entry.path)} (${entry.system}) ===`);
+    console.log(`\n=== ${basename(entry.path)} (${entry.system}, nix ${entry.nixVersion ?? "unknown"}) ===`);
     try {
       const json = await readEvalArchive(entry.path);
       await importEval({
@@ -147,6 +152,7 @@ async function cmdImport(): Promise<void> {
         commitHash: entry.commit,
         committedAt: dates.get(entry.commit)!,
         system: entry.system,
+        nixVersion: entry.nixVersion,
         onProgress: (m) => console.log(m),
       });
     } catch (err) {
@@ -174,9 +180,13 @@ async function cmdStatus(): Promise<void> {
     const head = await pool.query<{ seq: number; hash: string; committed_at: Date }>(
       `SELECT seq, hash, committed_at FROM commits ORDER BY seq DESC LIMIT 1`,
     );
-    const systems = await pool.query<{ system: string; n: string }>(
-      `SELECT system, count(*)::text AS n FROM commit_systems GROUP BY system ORDER BY system`,
-    );
+    // Latest Nix per system: a shift here is the first suspect when import
+    // counts change shape (see #19/#22).
+    const systems = await pool.query<{ system: string; n: string; nix_version: string | null }>(`
+      SELECT system, count(*)::text AS n,
+             (array_agg(nix_version ORDER BY commit_seq DESC))[1] AS nix_version
+      FROM commit_systems GROUP BY system ORDER BY system
+    `);
 
     console.log("## Index status\n");
     if (head.rows[0] !== undefined) {
@@ -186,9 +196,9 @@ async function cmdStatus(): Promise<void> {
     console.log("| table | rows |");
     console.log("|---|---|");
     for (const row of counts.rows) console.log(`| ${row.table_name} | ${row.n} |`);
-    console.log("\n| system | commits imported |");
-    console.log("|---|---|");
-    for (const row of systems.rows) console.log(`| ${row.system} | ${row.n} |`);
+    console.log("\n| system | commits imported | nix (latest import) |");
+    console.log("|---|---|---|");
+    for (const row of systems.rows) console.log(`| ${row.system} | ${row.n} | ${row.nix_version ?? "—"} |`);
   } finally {
     await pool.end();
   }
