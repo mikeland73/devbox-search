@@ -82,6 +82,12 @@ export const commits = pgTable(
  * range-close logic per system and distinguishes "the package is absent from
  * this commit" from "we never evaluated this system at this commit" — which
  * matters because CI imports systems independently and may backfill later.
+ *
+ * nix_version is the `nix --version` that produced the eval archive, carried
+ * over from the archive's R2 object metadata. The eval output shape is a
+ * nix-env behaviour (which packages are listed, how stubs appear), so when
+ * import counts shift this is the first thing to compare. Null for seeded
+ * rows and archives written before the metadata existed.
  */
 export const commitSystems = pgTable(
   "commit_systems",
@@ -91,6 +97,7 @@ export const commitSystems = pgTable(
       .references(() => commits.seq, { onDelete: "cascade" }),
     system: text("system").notNull(),
     importedAt: timestamp("imported_at", { withTimezone: true }).notNull().defaultNow(),
+    nixVersion: text("nix_version"),
   },
   (t) => [primaryKey({ columns: [t.commitSeq, t.system] })],
 );

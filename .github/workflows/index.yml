@@ -87,23 +87,36 @@ jobs:
       # are normal (not evaluated yet) and are left for dispatch. Each commit
       # carries its own system list from discover: all of SYSTEMS for a new
       # release, only the missing ones for a backfill.
+      #
+      # The eval workflow stamps each object with the `nix --version` that
+      # produced it (x-amz-meta-nix-version). It is copied to a sidecar file
+      # the importer records on commit_systems, and into the summary, so a
+      # Nix upgrade shows up next to the import counts it changed (#22).
       - id: fetch
         name: Fetch archived evals from R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          BUCKET: ${{ secrets.R2_BUCKET }}
           COMMITS: ${{ needs.discover.outputs.commits }}
         run: |
           missing='[]'
+          echo "## Fetched evals" >> "$GITHUB_STEP_SUMMARY"
+          echo "| commit | system | nix |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
           while IFS=$'\t' read -r hash committed_at systems; do
             ts=$(date -u -d "$committed_at" +%s)
             absent='[]'
             for system in $systems; do
               key="$system/$ts-$hash.json.gz"
               dir="evals/eval-$system-$hash"
-              if aws --endpoint-url "${{ secrets.R2_ENDPOINT }}" s3 cp "s3://${{ secrets.R2_BUCKET }}/$key" "$dir/eval.json.gz" 2>/dev/null; then
-                echo "fetched $key"
+              if aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/$key" "$dir/eval.json.gz" 2>/dev/null; then
+                nix_version=$(aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key "$key" | jq -r '.Metadata["nix-version"] // empty')
+                if [ -n "$nix_version" ]; then echo "$nix_version" > "$dir/nix-version"; fi
+                echo "fetched $key (nix ${nix_version:-unknown})"
+                echo "| \`${hash:0:12}\` | $system | ${nix_version:-unknown} |" >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "absent  $key"; absent=$(jq -c --arg s "$system" '. + [$s]' <<<"$absent")
               fi
