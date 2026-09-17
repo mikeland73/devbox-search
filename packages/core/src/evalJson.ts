@@ -120,6 +120,15 @@ export function decodeEvalJson(json: unknown, commit: string, committedAt: Date)
   for (const [rawAttrPath, rawPkg] of Object.entries(attrMap)) {
     const pkg = asRecord(rawPkg);
     if (pkg === null) continue;
+    // Deliberate divergence from the Go port. Nix >= 2.2x lists a package
+    // whose derivation refuses to evaluate (meta.broken without allowBroken,
+    // unsupported system, ...) as a stub: name/pname/version only, no meta,
+    // no outputs. Older nix-env dropped those, and the live service never
+    // served them (the seed head has 0 broken packages). Keeping them would
+    // add ~20k unresolvable, unflagged entries per system: no store path, no
+    // description, broken=false because the meta that says otherwise is
+    // absent. A package with no output path cannot be resolved, so skip it.
+    if (asRecord(pkg["outputs"]) === null) continue;
     const cleaned = cleanPackage(normalize(rawAttrPath), pkg);
     // The eval's system is the first package's system. All packages in one
     // eval should have the same system.
