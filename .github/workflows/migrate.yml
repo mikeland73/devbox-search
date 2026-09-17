@@ -1,0 +1,86 @@
+# Applies pending schema migrations to the Neon branches.
+#
+# Runs on every merge to main that touches packages/db/drizzle/, so a PR that
+# ships a migration also ships its deployment — the importer on the next
+# daily run finds the columns it expects. Also runs on demand; an up-to-date
+# database is a no-op that says "up to date".
+#
+# Each Neon branch is migrated separately (branching is a point-in-time copy,
+# not replication). A target whose secret is not set is skipped with a
+# notice, so prod can be wired up when it is seeded without touching this.
+name: migrate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/db/drizzle/**
+      - .github/workflows/migrate.yml
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which Neon branch to migrate"
+        type: choice
+        options: [both, staging, prod]
+        default: both
+
+# Never run DDL mid-import: ADD CONSTRAINT takes an exclusive lock on a 3.8M-row
+# table. Same group as index.yml, so the two serialize across workflows.
+concurrency:
+  group: indexer
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: staging
+            secret: DATABASE_URL_DIRECT_STAGING
+          - target: prod
+            secret: DATABASE_URL_DIRECT_PROD
+    name: migrate ${{ matrix.target }}
+    env:
+      # Direct (unpooled) endpoint: drizzle's migrator runs in a transaction,
+      # which Neon's transaction-mode pooler does not support.
+      DATABASE_URL_DIRECT: ${{ secrets[matrix.secret] }}
+      # Empty on push (migrate everything configured); the choice on dispatch.
+      TARGET: ${{ inputs.target }}
+    steps:
+      # A job-level `if` cannot see `matrix`, so the selection lives here and
+      # every later step is gated on it.
+      - name: Check target is selected and configured
+        id: configured
+        run: |
+          if [ -n "$TARGET" ] && [ "$TARGET" != both ] && [ "$TARGET" != "${{ matrix.target }}" ]; then
+            echo "${{ matrix.target }} not selected"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$DATABASE_URL_DIRECT" ]; then
+            echo "::notice::${{ matrix.secret }} is not set; skipping ${{ matrix.target }}"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.configured.outputs.skip != 'true'
+        uses: actions/checkout@v4
+      - if: steps.configured.outputs.skip != 'true'
+        uses: pnpm/action-setup@v4
+      - if: steps.configured.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - if: steps.configured.outputs.skip != 'true'
+        run: pnpm install --frozen-lockfile
+      # migrate.js needs the core -> db dist chain, not the whole workspace.
+      - if: steps.configured.outputs.skip != 'true'
+        run: pnpm --filter "@devbox-search/db..." build
+
+      - if: steps.configured.outputs.skip != 'true'
+        name: Migrate ${{ matrix.target }}
+        run: |
+          set -o pipefail
+          echo "## ${{ matrix.target }}" >> "$GITHUB_STEP_SUMMARY"
+          node packages/db/dist/migrate.js | tee -a "$GITHUB_STEP_SUMMARY"

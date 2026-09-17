@@ -50,7 +50,7 @@ are pulled with `vercel env pull`.
 | Production URL | https://devbox-search.vercel.app |
 | Neon resource | `devbox-search-db` — Neon project `autumn-rain-65994722`, region `iad1` (aws us-east-1), Postgres 17, plan **Launch** |
 | Neon org | `org-frosty-butterfly-42439211` (Vercel-managed) |
-| Neon branches | `main` (default, = prod) and `staging` |
+| Neon branches | `main` only (`br-steep-shadow-auedwzp8`, endpoint `ep-purple-river-auzjl04j`). The `staging` branch was folded into `main` on 2026-09-17 — see [Single branch](#single-branch-since-2026-09-17). |
 | Neon dashboard | `vercel integration open neon devbox-search-db` (SSO) |
 
 `neonctl` works against this project — the Vercel-managed org shows up after
@@ -59,7 +59,7 @@ are pulled with `vercel env pull`.
 ```sh
 npx neonctl projects list --org-id org-frosty-butterfly-42439211
 npx neonctl branches list --project-id autumn-rain-65994722
-npx neonctl connection-string staging --project-id autumn-rain-65994722 [--pooled]
+npx neonctl connection-string main --project-id autumn-rain-65994722 [--pooled]
 ```
 
 > Neon's default branch here is called `main`, not `production` — same word as
@@ -86,23 +86,40 @@ Two of the names Neon writes matter, and one needs renaming outside Vercel:
 
 The rest (`POSTGRES_*`, `PG*`) are unused by this codebase.
 
-Which Neon branch each Vercel environment points at:
+All three Vercel environments (Production, Preview, Development) point at
+Neon `main` — the integration-style records `DATABASE_URL` /
+`DATABASE_URL_UNPOOLED` are scoped to all three. There is no per-environment
+override any more; `vercel env pull --environment=<any>` yields the same
+database.
 
-| Vercel env | Neon branch | Record owner |
-|---|---|---|
-| Production, Development | `main` | the integration |
-| Preview | `staging` | **manual override** |
+`vercel env pull --environment=production` is the right way to get the
+credentials for a local `db migrate` or importer run — don't copy them out of
+the Neon console.
 
-The integration's own records were narrowed to `production,development` and
-plain preview-scoped records added alongside — Vercel rejects two records with
-the same key and overlapping targets, so the narrowing is required, not
-cosmetic. Consequence: if the integration ever re-syncs and re-widens its
-records back to all three environments, Preview silently starts pointing at
-prod. Re-check with `vercel env pull --environment=preview` before trusting a
-shadow-diff run.
+### Single branch (since 2026-09-17)
 
-`vercel env pull --environment=preview` is the right way to get the staging
-credentials for a local seed — don't copy them out of the Neon console.
+Until 2026-09-17 there were two Neon branches: `main` (empty, prod) and
+`staging` (seeded + indexed daily, Preview + the indexer pointed at it). That
+was consolidated into one branch holding the full index, and everything —
+Vercel Production/Preview/Development, the `DATABASE_URL_DIRECT` GitHub
+secret, local tooling — now points at `main`.
+
+How it was done, for the record: a Neon branch *restore* (`neon branches
+restore main staging`) copies data instantly but makes the target a
+copy-on-write **child** of the source, and Neon refuses to delete a branch
+that has children — so restore alone cannot retire `staging`. The actual copy
+was `pg_dump --format=custom` of the restored `main` (~3.6 GB logical, a few
+minutes) and `pg_restore --jobs=4` into the original root branch, which then
+became the default `main`; the old `main` and `staging` were deleted. The
+endpoint host changed as part of this (`ep-empty-wind…` → `ep-purple-river…`),
+which is why the Vercel records and the GitHub secret were rewritten rather
+than left alone.
+
+Neon branching is still the right tool for trying a schema change or a
+risky import against real data without touching prod: `neon branches create
+--parent main --name <scratch>`, point a local `DATABASE_URL_DIRECT` at it,
+and delete it afterwards. Just don't `restore main <scratch>` expecting to
+delete `<scratch>` afterwards.
 
 ---
 
@@ -167,8 +184,9 @@ because we don't want Neon Auth. `iad1` matches Vercel's default function
 region.
 
 - [x] Neon project created and connected to the Vercel project
-- [x] **staging branch** created off `main`. The Vercel CLI manages the
-      resource, not the branches inside it, so this is `neonctl`:
+- [x] ~~**staging branch** created off `main`~~ — created 2026-08-14,
+      **retired 2026-09-17** (see [Single branch](#single-branch-since-2026-09-17)).
+      Branch operations go through `neonctl`, not the Vercel CLI:
 
 ```sh
 npx neonctl branches create --project-id autumn-rain-65994722 \
@@ -178,9 +196,8 @@ npx neonctl branches create --project-id autumn-rain-65994722 \
   A Neon branch is copy-on-write, so `staging` came up already holding the
   migrated schema — no second `migrate` run needed.
 
-- [x] **Preview** repointed at staging (see [Env vars](#env-vars); all three
-      environments shared the prod branch out of the box, which is wrong once
-      prod holds real data)
+- [x] ~~**Preview** repointed at staging~~ — reverted 2026-09-17; all three
+      environments share `main` again, on purpose this time
 
 > The unpooled string is not optional for seed and import. COPY and
 > session-level advisory locks do not work through Neon's pooler
@@ -209,8 +226,9 @@ from the repo root builds green.
 - [x] Apply migrations to Neon `main`. `staging` was branched afterwards and
       inherited all 8 tables, so it needed no separate run.
 
-For any **future** migration, both branches have to be done separately —
-branching is a point-in-time copy, not ongoing replication:
+For any **future** migration there is a single branch to run it against
+(if you ever add a scratch branch, remember branching is a point-in-time copy,
+not ongoing replication — each branch needs its own `migrate`):
 
 ```sh
 pnpm install
@@ -286,8 +304,8 @@ DEVBOX_SEARCH_HOST=https://<preview-url> devbox add python@3.11 hello go@1.22
 ```
 
 - [x] Merge PR #6
-- [ ] Bump prod compute, seed the prod branch (same command, prod direct URL),
-      drop compute back
+- [x] ~~Bump prod compute, seed the prod branch~~ — moot: the fully indexed
+      staging data *became* `main` on 2026-09-17, migrations 0000–0003 applied
 - [ ] Promote to Production. `DATABASE_URL` for the Production environment
       already points at Neon `main`, and git is connected, so a push to `main`
       does it. `vercel deploy --prod` forces one without a commit.
@@ -338,7 +356,9 @@ required for it to be useful.
     content hashes disagree with the seed, i.e. the importer and seed are
     hashing differently
 
-- [ ] Switch to **prod** and keep shadow-diffing daily
+- [x] Switch to **prod** — 2026-09-17, `DATABASE_URL_DIRECT` now the `main`
+      direct URL (there is no other branch)
+- [ ] Keep shadow-diffing daily
 
 ---
 

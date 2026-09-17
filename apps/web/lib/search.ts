@@ -124,11 +124,12 @@ function nameOrAttrPath(term: string): SQL {
 const resultColumns = {
   name: packages.name,
   version: versions.version,
-  commitHash: sql<string>`commit_hash.hash`,
-  // A raw fragment has no column decoder; borrow the column's so the value
-  // is a Date on every driver (neon-http already parses timestamptz, PGlite
-  // under drizzle leaves it as a string).
-  lastUpdated: sql`commit_hash.committed_at`.mapWith(commits.committedAt),
+  // Schema columns, not raw `sql` fragments: only a column goes through
+  // drizzle's driver-value mapping, and both neon-http and PGlite hand
+  // timestamps back as strings. The renderers call `.toISOString()` on
+  // lastUpdated, so a raw fragment here is a 500 on every route.
+  commitHash: commits.hash,
+  lastUpdated: commits.committedAt,
   storeHash: variants.storeHash,
   storeName: variants.storeName,
   storeVersion: versions.version,
@@ -158,7 +159,7 @@ function baseQuery() {
     .innerJoin(versions, eq(versions.id, variants.versionId))
     .innerJoin(packages, eq(packages.id, versions.packageId))
     .innerJoin(meta, eq(meta.id, variants.metaId))
-    .innerJoin(sql`commits AS commit_hash`, sql`commit_hash.seq = ${variants.commitSeq}`);
+    .innerJoin(commits, eq(commits.seq, variants.commitSeq));
 }
 
 /**
@@ -442,7 +443,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
       .innerJoin(versions, eq(versions.id, variants.versionId))
       .innerJoin(packages, eq(packages.id, versions.packageId))
       .innerJoin(meta, eq(meta.id, variants.metaId))
-      .innerJoin(sql`commits AS commit_hash`, sql`commit_hash.seq = ${variants.commitSeq}`)
+      .innerJoin(commits, eq(commits.seq, variants.commitSeq))
       .orderBy(sql`hits.ord`, asc(variants.system), asc(variants.attrPath))
       .limit(50);
     return rows as ResultPackage[];
@@ -455,7 +456,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
     .innerJoin(variants, eq(variants.versionId, versions.id))
     .innerJoin(packages, eq(packages.id, versions.packageId))
     .innerJoin(meta, eq(meta.id, variants.metaId))
-    .innerJoin(sql`commits AS commit_hash`, sql`commit_hash.seq = ${variants.commitSeq}`)
+    .innerJoin(commits, eq(commits.seq, variants.commitSeq))
     .orderBy(
       sql`hits.ord`,
       desc(versions.sortKey),
