@@ -376,24 +376,32 @@ required for it to be useful.
 **How a day's indexing works.** `index.yml` (header comment has the exact
 ordering) discovers releases newer than the DB head from the nix-releases
 bucket, dispatches `eval.yml` in the public repo for any (commit, system) not
-yet in R2, and imports whatever is archived. `commit_systems` records which
-pairs landed; `discover --systems` re-lists a commit missing one. Public-repo
-runs are at
+yet in R2, **waits for those archives to land** (#14, PR #34 — polls R2 up to
+`wait_minutes`, default 20, stopping early once every dispatched run has
+finished), then fetches and imports everything archived for the pending
+commits. A commit is searchable minutes after it appears on the channel
+instead of the next day. Leaving on the wait cap is a `::warning`, not a
+failure: whatever landed is imported and the rest is re-listed tomorrow.
+`commit_systems` records which pairs landed; `discover --systems` re-lists a
+commit missing one. Public-repo runs are at
 https://github.com/mikeland73/devbox-search-indexer/actions/workflows/eval.yml.
 
 **Catching up a backlog** (more than a handful of releases pending):
 
 ```sh
-gh workflow run index.yml -f limit=12
+gh workflow run index.yml -f limit=15 -f wait_minutes=30
 ```
 
 - `discover --limit` counts *all* pending commits, archived-but-unimported
-  ones included, so size each run as *(archived awaiting import) + ~8*, cap
-  ~15 without raising the import job's timeout.
-- Import is the bottleneck (~2 min per commit for 3 systems); evals are
-  ~4.5 min per job and the public repo runs 20 jobs concurrently.
-- Let the dispatched evals finish before the next run, or the same commits
-  are dispatched again (harmless — same key in R2 — but wasted).
+  ones included. Cap ~15: the `index` job's `timeout-minutes` is 120 and a
+  run costs `wait_minutes` of idling plus ~2 min of import per commit.
+- Evals are ~4.5 min per job and the public repo runs 20 jobs concurrently,
+  so `limit=15` is 45 jobs ≈ 3 waves — raise `wait_minutes` accordingly or
+  accept that the last wave imports on the next run.
+- Runs serialize on the `indexer` concurrency group, so back-to-back
+  dispatches queue rather than overlap. Re-dispatching a commit whose
+  archive already landed is skipped; one still in flight is dispatched
+  again (harmless — same key in R2 — but wasted).
 
 **Reading `commits.committed_at`.** It is the **nixpkgs commit date**, not
 when the row was imported. A head at seq 2795 dated 2026-09-14 on 09-17 is
@@ -537,7 +545,7 @@ surfaced these. Each one either produced a misleading error or no error at all.
 | Neon Launch | ~$5–22 (storage ~$1.40, compute varies with CDN hit rate) — billed through Vercel, not a separate Neon account |
 | Vercel | $0 incremental (already paid) |
 | Eval runners | **$0** — public `devbox-search-indexer` repo, unlimited minutes (~14 job-minutes per commit) |
-| GitHub standard runners (discover/import, this repo) | **$0** — ~15–25 min/day (more once #14 waits for evals), well inside the Pro plan's 3,000 included minutes |
+| GitHub standard runners (discover/import, this repo) | **$0** — ~15–30 min/day including the wait for evals (#14), well inside the Pro plan's 3,000 included minutes |
 | R2 eval archive | $0 (free 10 GB ≈ 3–5 years of archives) |
 | **Total** | **~$5–22/mo**, all Neon |
 
