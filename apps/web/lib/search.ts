@@ -99,12 +99,25 @@ export function normalizeQuery(q: SearchQuery): SearchQuery {
 /**
  * The `WITH target AS (...)` predicate: match the canonical name
  * case-insensitively, or the attribute path exactly.
+ *
+ * Written as a semi-join on variant ids rather than
+ * `lower(packages.name) = ? OR variants.attr_path = ?`: an OR spanning two
+ * tables can't be served by either table's index, so the planner hash-joined
+ * every variant (3.8M rows, ~4 s) for each lookup. Each UNION arm is a plain
+ * index walk (packages_name_lower_idx -> versions -> variants_identity_key,
+ * and variants_attr_path_idx), which brings a lookup to single-digit ms.
+ * See docs/query-plans.md.
  */
 function nameOrAttrPath(term: string): SQL {
-  return or(
-    sql`lower(${packages.name}) = lower(${term})`,
-    eq(variants.attrPath, term),
-  )!;
+  return sql`${variants.id} IN (
+    SELECT va.id
+    FROM ${packages} p
+    JOIN ${versions} ve ON ve.package_id = p.id
+    JOIN ${variants} va ON va.version_id = ve.id
+    WHERE lower(p.name) = lower(${term})
+    UNION
+    SELECT va.id FROM ${variants} va WHERE va.attr_path = ${term}
+  )`;
 }
 
 /** The column list every searcher selects, joined into a ResultPackage. */
@@ -382,19 +395,53 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
 
   if (ranked.length === 0) return [];
 
-  const results: ResultPackage[] = [];
-  for (const [i, hit] of ranked.entries()) {
-    const rows = latestOnly
-      ? await searchByNameVersion({ name: hit.name, version: "latest", noPrerelease: true })
-      : await searchByName({ name: hit.name });
-    // Preserve rank order across packages; within a package the per-query
-    // ordering already matches the old service.
-    for (const row of rows) results.push(row);
-    if (latestOnly && results.length >= 50) break;
-    if (!latestOnly && results.length >= 1000) break;
-    void i;
+  // One query for every hit rather than two or three per hit: under
+  // neon-http each query is an HTTPS round trip, and 50 hits x 3 queries was
+  // most of /v2/search's latency. `hits` carries the rank order so rows come
+  // back in it; within a package the ordering matches the old service.
+  const hits = sql`unnest(string_to_array(${ranked.map((h) => h.packageId).join(",")}, ',')::int[])
+    WITH ORDINALITY AS hits(package_id, ord)`;
+
+  if (latestOnly) {
+    // Per package, the newest non-prerelease version, preferring one with a
+    // non-broken variant (sanctioned change #3) — the choice
+    // pickLatestVersionId makes, expressed as a single ordering.
+    const rows = await db()
+      .select(resultColumns)
+      .from(hits)
+      .innerJoin(
+        sql`LATERAL (
+          SELECT v.id AS version_id
+          FROM ${versions} v
+          WHERE v.package_id = hits.package_id AND v.prerelease = false
+          ORDER BY
+            EXISTS (SELECT 1 FROM ${variants} b WHERE b.version_id = v.id AND NOT b.broken) DESC,
+            v.sort_key DESC
+          LIMIT 1
+        ) AS latest`,
+        sql`true`,
+      )
+      .innerJoin(variants, sql`${variants.versionId} = latest.version_id`)
+      .innerJoin(versions, eq(versions.id, variants.versionId))
+      .innerJoin(packages, eq(packages.id, versions.packageId))
+      .innerJoin(meta, eq(meta.id, variants.metaId))
+      .innerJoin(sql`commits AS commit_hash`, sql`commit_hash.seq = ${variants.commitSeq}`)
+      .orderBy(sql`hits.ord`, asc(variants.system), asc(variants.attrPath))
+      .limit(50);
+    return rows as ResultPackage[];
   }
-  return results.slice(0, latestOnly ? 50 : 1000);
+
+  const rows = await db()
+    .select(resultColumns)
+    .from(hits)
+    .innerJoin(versions, sql`${versions.packageId} = hits.package_id`)
+    .innerJoin(variants, eq(variants.versionId, versions.id))
+    .innerJoin(packages, eq(packages.id, versions.packageId))
+    .innerJoin(meta, eq(meta.id, variants.metaId))
+    .innerJoin(sql`commits AS commit_hash`, sql`commit_hash.seq = ${variants.commitSeq}`)
+    .orderBy(sql`hits.ord`, desc(versions.sortKey), asc(variants.system), asc(variants.attrPath))
+    .limit(1000);
+  return rows as ResultPackage[];
 }
 
 /** Dispatch mirroring Searcher.search's switch. */

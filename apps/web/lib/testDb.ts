@@ -27,6 +27,8 @@ import { useDb, type SearchDb } from "./search";
 
 export interface TestDb {
   db: SearchDb;
+  /** Every statement issued through `db`, in order (clear it between phases). */
+  queries: string[];
   close(): Promise<void>;
 }
 
@@ -34,10 +36,12 @@ export interface TestDb {
 export async function createTestDb(): Promise<TestDb> {
   const client = await PGlite.create({ extensions: { pg_trgm } });
   for (const statement of migrationStatements()) await client.exec(statement);
-  const db = drizzle(client, { schema });
+  const queries: string[] = [];
+  const db = drizzle(client, { schema, logger: { logQuery: (query) => void queries.push(query) } });
   useDb(db);
   return {
     db,
+    queries,
     async close() {
       useDb(undefined);
       await client.close();
