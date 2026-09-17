@@ -1,21 +1,27 @@
-# Daily nixpkgs indexing: discover -> import -> dispatch.
+# Daily nixpkgs indexing: discover -> dispatch -> wait -> fetch -> import.
 #
 # The eval itself does not run here. Evaluating all of nixpkgs needs ~16 GB,
 # and a private repo's runners have 7 GB; the free 4-vCPU/16 GB runners are
 # public-repo only. So the eval lives in the public mikeland73/devbox-search-indexer
 # repo (one workflow, no application code), which archives each
 # (commit, system) eval to R2. This workflow discovers what needs indexing,
-# imports whatever the public repo has already archived, and dispatches evals
-# for what's still missing.
+# dispatches evals for whatever is not archived yet, waits for them, then
+# fetches and imports everything archived for the pending commits.
 #
-# Import runs BEFORE dispatch on purpose: a commit dispatched today is
-# archived in an hour or two and imported by tomorrow's run. That is a day of
-# lag in exchange for no polling, no idle runner minutes, and no cross-repo
-# callback. Everything here is minutes of standard-runner time.
+# Waiting is cheap: an eval is 2-4 min per system, ~4.5 min per job including
+# the Nix install (public run 35143837821), so a commit is searchable within
+# minutes of appearing on the channel. The earlier design imported first and
+# dispatched last to avoid idle runner minutes, at the cost of a day of lag;
+# that lag bought nothing once the eval turned out to be minutes, not hours.
+#
+# Fetch runs over ALL pending commits, not just today's dispatches, so an
+# archive that landed after a previous run gave up waiting is imported the
+# next day without anyone doing anything. Dispatch skips keys already in R2
+# for the same reason: a hiccup here never re-evaluates a finished commit.
 #
 # commit_systems records which (commit, system) pairs landed, so a day where
-# one system's eval failed imports the other three and picks up the fourth
-# whenever it appears.
+# one system's eval failed imports the other two and picks up the third
+# whenever it appears (discover re-lists it via --systems).
 name: index
 
 on:
@@ -28,6 +34,12 @@ on:
         description: "Max commits to index this run"
         required: false
         default: "4"
+      wait_minutes:
+        # ~5-10 min for a daily run. A catch-up run at limit=15 is 45 eval
+        # jobs against the public repo's 20-job concurrency, ~3 waves.
+        description: "How long to wait for dispatched evals before importing what has landed"
+        required: false
+        default: "20"
 
 # Serialize with the advisory lock the importer also takes.
 concurrency:
@@ -64,14 +76,20 @@ jobs:
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  import:
+  index:
     needs: discover
     if: needs.discover.outputs.count != '0'
     runs-on: ubuntu-latest
+    # wait_minutes of idling plus ~2 min per imported commit; a limit=15
+    # catch-up run stays well inside this.
     timeout-minutes: 120
-    outputs:
-      # Pending commits with at least one system not yet archived, and which.
-      missing: ${{ steps.fetch.outputs.missing }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      BUCKET: ${{ secrets.R2_BUCKET }}
+      COMMITS: ${{ needs.discover.outputs.commits }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -82,33 +100,108 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
 
+      # One eval dispatch per pending commit, for the systems whose archive is
+      # not in R2 yet. Each commit carries its own system list from discover:
+      # all of SYSTEMS for a new release, only the missing ones for a backfill.
+      # An archive that is already there (yesterday's eval finished after we
+      # stopped waiting; a manual run) is not re-evaluated, just imported below.
+      - id: dispatch
+        name: Dispatch evals in the public repo
+        # A dispatch failure (expired PAT, public repo down) must not stop the
+        # import of what is already archived; the last step fails the job
+        # afterwards so it still shows red.
+        continue-on-error: true
+        env:
+          # Fine-grained PAT, Actions: read/write on EVAL_REPO only. The
+          # workflow's own GITHUB_TOKEN cannot dispatch across repos.
+          GH_TOKEN: ${{ secrets.INDEXER_DISPATCH_TOKEN }}
+        run: |
+          # Recorded before the first dispatch so the wait step can find the
+          # runs it created (`gh run list --created`).
+          echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          dispatched='[]'
+          while IFS=$'\t' read -r hash committed_at systems; do
+            ts=$(date -u -d "$committed_at" +%s)
+            absent='[]'
+            for system in $systems; do
+              key="$system/$ts-$hash.json.gz"
+              if aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key "$key" > /dev/null 2>&1; then
+                echo "archived   $key"
+              else
+                absent=$(jq -c --arg s "$system" '. + [$s]' <<<"$absent")
+              fi
+            done
+            if [ "$absent" != '[]' ]; then
+              gh workflow run eval.yml -R "$EVAL_REPO" -f "commit=$hash" -f "committed_at=$committed_at" -f "systems=$absent"
+              echo "dispatched $hash ($committed_at) $absent" | tee -a "$GITHUB_STEP_SUMMARY"
+              dispatched=$(jq -c --arg h "$hash" --arg d "$committed_at" --argjson s "$absent" '. + [{hash: $h, committedAt: $d, systems: $s}]' <<<"$dispatched")
+            fi
+          done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | join(" "))"' <<<"$COMMITS")
+          echo "dispatched=$dispatched" >> "$GITHUB_OUTPUT"
+          echo "evals dispatched: $(jq length <<<"$dispatched")"
+
+      # Poll R2 for the keys we just dispatched. Done when they are all there,
+      # when every eval run started since dispatch has finished (so a missing
+      # key is a failed eval and waiting longer will not help), or at the cap.
+      # A dispatched run takes a few seconds to appear in the run list, hence
+      # the "at least as many runs as dispatches" check before trusting
+      # "nothing active". Leaving on the cap is not an error: whatever landed
+      # is imported now and the rest is re-listed by discover tomorrow.
+      - name: Wait for evals
+        if: steps.dispatch.outcome == 'success' && steps.dispatch.outputs.dispatched != '[]'
+        env:
+          GH_TOKEN: ${{ secrets.INDEXER_DISPATCH_TOKEN }}
+          DISPATCHED: ${{ steps.dispatch.outputs.dispatched }}
+          STARTED_AT: ${{ steps.dispatch.outputs.started_at }}
+          WAIT_MINUTES: ${{ inputs.wait_minutes || '20' }}
+        run: |
+          expected=$(jq length <<<"$DISPATCHED")
+          start=$(date +%s)
+          deadline=$(( start + WAIT_MINUTES * 60 ))
+          while :; do
+            pending=0
+            while IFS=$'\t' read -r hash committed_at systems; do
+              ts=$(date -u -d "$committed_at" +%s)
+              for system in $systems; do
+                aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key "$system/$ts-$hash.json.gz" > /dev/null 2>&1 || pending=$(( pending + 1 ))
+              done
+            done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | join(" "))"' <<<"$DISPATCHED")
+            if [ "$pending" -eq 0 ]; then
+              echo "all dispatched evals archived after $(( ($(date +%s) - start) / 60 )) min"
+              break
+            fi
+            runs=$(gh run list -R "$EVAL_REPO" --workflow=eval.yml --created ">=$STARTED_AT" --limit 100 --json status,conclusion,url)
+            total=$(jq length <<<"$runs")
+            active=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+            if [ "$total" -ge "$expected" ] && [ "$active" -eq 0 ]; then
+              echo "::warning::evals finished but $pending archive(s) still missing; failed runs:"
+              jq -r '.[] | select(.conclusion != "success") | "  \(.conclusion) \(.url)"' <<<"$runs" | tee -a "$GITHUB_STEP_SUMMARY"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::warning::gave up waiting after $WAIT_MINUTES min with $pending archive(s) missing and $active eval run(s) active; they import on the next run"
+              break
+            fi
+            echo "$(date -u +%H:%M:%S) waiting: $pending archive(s) missing, $active of $total eval run(s) active"
+            sleep 60
+          done
+
       # Pull whatever the public repo has archived for the pending commits
       # into the eval-{system}-{hash}/ layout the importer reads. Absent keys
-      # are normal (not evaluated yet) and are left for dispatch. Each commit
-      # carries its own system list from discover: all of SYSTEMS for a new
-      # release, only the missing ones for a backfill.
+      # are a failed or slow eval; discover re-lists them tomorrow.
       #
       # The eval workflow stamps each object with the `nix --version` that
       # produced it (x-amz-meta-nix-version). It is copied to a sidecar file
       # the importer records on commit_systems, and into the summary, so a
       # Nix upgrade shows up next to the import counts it changed (#22).
-      - id: fetch
-        name: Fetch archived evals from R2
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          BUCKET: ${{ secrets.R2_BUCKET }}
-          COMMITS: ${{ needs.discover.outputs.commits }}
+      - name: Fetch archived evals from R2
         run: |
-          missing='[]'
+          missing=0
           echo "## Fetched evals" >> "$GITHUB_STEP_SUMMARY"
           echo "| commit | system | nix |" >> "$GITHUB_STEP_SUMMARY"
           echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
           while IFS=$'\t' read -r hash committed_at systems; do
             ts=$(date -u -d "$committed_at" +%s)
-            absent='[]'
             for system in $systems; do
               key="$system/$ts-$hash.json.gz"
               dir="evals/eval-$system-$hash"
@@ -118,15 +211,12 @@ jobs:
                 echo "fetched $key (nix ${nix_version:-unknown})"
                 echo "| \`${hash:0:12}\` | $system | ${nix_version:-unknown} |" >> "$GITHUB_STEP_SUMMARY"
               else
-                echo "absent  $key"; absent=$(jq -c --arg s "$system" '. + [$s]' <<<"$absent")
+                echo "absent  $key"; missing=$(( missing + 1 ))
+                echo "| \`${hash:0:12}\` | $system | _not archived_ |" >> "$GITHUB_STEP_SUMMARY"
               fi
             done
-            if [ "$absent" != '[]' ]; then
-              missing=$(jq -c --arg h "$hash" --arg d "$committed_at" --argjson s "$absent" '. + [{hash: $h, committedAt: $d, systems: $s}]' <<<"$missing")
-            fi
           done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | join(" "))"' <<<"$COMMITS")
-          echo "missing=$missing" >> "$GITHUB_OUTPUT"
-          echo "commits still needing eval: $(jq length <<<"$missing")"
+          echo "archives still missing: $missing"
 
       - name: Import
         env:
@@ -142,22 +232,8 @@ jobs:
         env:
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
 
-  dispatch:
-    needs: [discover, import]
-    # Dispatch even if import failed: the evals are independent of it, and a
-    # commit that is archived but not yet imported is skipped by the
-    # `missing` check anyway.
-    if: always() && needs.discover.outputs.count != '0' && needs.import.outputs.missing != '' && needs.import.outputs.missing != '[]'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Dispatch evals in the public repo
-        env:
-          # Fine-grained PAT, Actions: read/write on EVAL_REPO only. The
-          # workflow's own GITHUB_TOKEN cannot dispatch across repos.
-          GH_TOKEN: ${{ secrets.INDEXER_DISPATCH_TOKEN }}
-          MISSING: ${{ needs.import.outputs.missing }}
+      - name: Fail if dispatch failed
+        if: steps.dispatch.outcome == 'failure'
         run: |
-          while IFS=$'\t' read -r hash committed_at systems; do
-            gh workflow run eval.yml -R "$EVAL_REPO" -f "commit=$hash" -f "committed_at=$committed_at" -f "systems=$systems"
-            echo "dispatched $hash ($committed_at) $systems" | tee -a "$GITHUB_STEP_SUMMARY"
-          done < <(jq -r '.[] | "\(.hash)\t\(.committedAt)\t\(.systems | tojson)"' <<<"$MISSING")
+          echo "::error::dispatching evals to $EVAL_REPO failed; archived evals were still imported. Check INDEXER_DISPATCH_TOKEN."
+          exit 1
