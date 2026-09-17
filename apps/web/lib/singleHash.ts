@@ -30,7 +30,7 @@ interface RangeRow {
  * neon-http returns an object with `rows`, PGlite (tests) too, and some
  * drivers return the array directly.
  */
-function rowsOf<T>(result: unknown): T[] {
+export function rowsOf<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   return (result as { rows: T[] }).rows;
 }
