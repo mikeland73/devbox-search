@@ -23,7 +23,7 @@
 import { and, asc, desc, eq, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { escapeLike, normalize } from "@devbox-search/core";
-import { createServingClient, meta, packages, schema, variants, versions } from "@devbox-search/db";
+import { commits, createServingClient, meta, packages, schema, variants, versions } from "@devbox-search/db";
 import { parseConstraint, satisfies, type Constraint } from "./constraint";
 
 export interface SearchQuery {
@@ -125,7 +125,10 @@ const resultColumns = {
   name: packages.name,
   version: versions.version,
   commitHash: sql<string>`commit_hash.hash`,
-  lastUpdated: sql<Date>`commit_hash.committed_at`,
+  // A raw fragment has no column decoder; borrow the column's so the value
+  // is a Date on every driver (neon-http already parses timestamptz, PGlite
+  // under drizzle leaves it as a string).
+  lastUpdated: sql`commit_hash.committed_at`.mapWith(commits.committedAt),
   storeHash: variants.storeHash,
   storeName: variants.storeName,
   storeVersion: versions.version,
