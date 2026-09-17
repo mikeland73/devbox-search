@@ -136,10 +136,10 @@ hard way" below.
 
 ### 0.2 Prove the eval fits in memory — **done**
 
-The probe workflow (`eval-experiment.yml`) is deleted by PR #32 (#18) now
-that its numbers are recorded here; on this private repo it could only ever
-land on the runner where the eval doesn't fit. A one-off manual eval today is `eval.yml`
-in the public repo, dispatched with a single system.
+The probe workflow (`eval-experiment.yml`) was deleted in PR #32 (#18, merged
+2026-09-17) once its numbers were recorded here; on this private repo it could
+only ever land on the runner where the eval doesn't fit. A one-off manual eval
+today is `eval.yml` in the public repo, dispatched with a single system.
 
 - [x] Run **eval-experiment** on `ubuntu-latest` — run 35136891482,
       `x86_64-linux` at `6b5e5b7a` (2026-09-16); earlier attempts died on the
