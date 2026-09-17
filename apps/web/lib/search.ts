@@ -382,19 +382,42 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
 
   if (ranked.length === 0) return [];
 
+  const limit = latestOnly ? 50 : 1000;
   const results: ResultPackage[] = [];
-  for (const [i, hit] of ranked.entries()) {
+  for (const hit of ranked) {
     const rows = latestOnly
       ? await searchByNameVersion({ name: hit.name, version: "latest", noPrerelease: true })
       : await searchByName({ name: hit.name });
     // Preserve rank order across packages; within a package the per-query
     // ordering already matches the old service.
-    for (const row of rows) results.push(row);
-    if (latestOnly && results.length >= 50) break;
-    if (!latestOnly && results.length >= 1000) break;
-    void i;
+    for (const row of onePerVersion(rows)) results.push(row);
+    if (results.length >= limit) break;
   }
-  return results.slice(0, latestOnly ? 50 : 1000);
+  return results.slice(0, limit);
+}
+
+/**
+ * Collapses phrase-search rows to one per package x version, keeping the
+ * first row seen for each.
+ *
+ * The old queries grouped: sqlPrefixLatestSearch `GROUP BY pkg.name` (one
+ * row per package, at its newest version) and sqlPrefixSearch
+ * `GROUP BY pkg.name, pkg.version` (one row per version). Either way a
+ * search result is a package, not a package x system, and the response
+ * builders count results accordingly. Rows arrive sorted by system then
+ * attr_path within a version, so "first row" is the lowest system — the
+ * same row sqlite's bare-column grouping surfaced in the live service.
+ */
+function onePerVersion(rows: ResultPackage[]): ResultPackage[] {
+  const seen = new Set<string>();
+  const out: ResultPackage[] = [];
+  for (const row of rows) {
+    const key = row.name.toLowerCase() + "\t" + row.version;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
 }
 
 /** Dispatch mirroring Searcher.search's switch. */
