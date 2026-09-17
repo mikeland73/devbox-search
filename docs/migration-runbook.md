@@ -388,6 +388,13 @@ produced a misleading error or no error at all.
   Migration `0001_semver_bigint`. **Prod needs `db migrate` before its seed.**
 - **The PGlite test suites had `0000_init.sql` hardcoded**, so a second
   migration would never have been tested. They now apply the journal.
+- **Migration `0002_variants_store_hash_check`** (#21): `CHECK (store_hash
+  <> '')` on `variants`, and the `''` default dropped. Backstop for the #19
+  stubs, which reached the DB as ~75k phantom variants per commit before the
+  decoder skipped them; the importer now also refuses an eval containing one.
+  Apply to **both** staging and prod (`db migrate`, as above). `ADD
+  CONSTRAINT` scans the table under an exclusive lock — seconds at 3.8M rows,
+  but don't run it mid-import.
 - The staging seed took ~10 minutes on default Neon compute. The "bump
   compute" step is unnecessary.
 

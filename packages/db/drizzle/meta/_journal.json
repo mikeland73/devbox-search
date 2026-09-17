@@ -15,6 +15,13 @@
       "when": 1789581801306,
       "tag": "0001_semver_bigint",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789661978547,
+      "tag": "0002_variants_store_hash_check",
+      "breakpoints": true
     }
   ]
 }

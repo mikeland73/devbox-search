@@ -142,16 +142,16 @@ describe("schema behavior", () => {
     // (python3 and python311 both provide python 3.11.0).
     for (const attrPath of ["python3", "python311"]) {
       await db.query(
-        `INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, content_hash)
-         VALUES ($1, 'x86_64-linux', $2, $3, 1, $4)`,
-        [versionId, attrPath, metaId, "2".repeat(64)],
+        `INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, store_hash, content_hash)
+         VALUES ($1, 'x86_64-linux', $2, $3, 1, $4, $5)`,
+        [versionId, attrPath, metaId, "a".repeat(32), "2".repeat(64)],
       );
     }
     await expect(
       db.query(
-        `INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, content_hash)
-         VALUES ($1, 'x86_64-linux', 'python3', $2, 1, $3)`,
-        [versionId, metaId, "3".repeat(64)],
+        `INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, store_hash, content_hash)
+         VALUES ($1, 'x86_64-linux', 'python3', $2, 1, $3, $4)`,
+        [versionId, metaId, "a".repeat(32), "3".repeat(64)],
       ),
     ).rejects.toThrow(/duplicate key/);
 
@@ -180,6 +180,31 @@ describe("schema behavior", () => {
        ORDER BY v.attr_path`,
     );
     expect(atCommit3.map((r) => r.attr_path)).toEqual(["python311"]);
+  });
+
+  test("a variant with no store hash is a stub, and the table refuses it", async () => {
+    // Belt and braces with the importer's own guard: the one time stubs got
+    // through the decoder they became ~75k phantom variants per commit.
+    const versionId = (await rows<{ id: number }>(`SELECT id FROM versions WHERE version = '3.11.0'`))[0]!.id;
+    const metaId = (await rows<{ id: number }>(`SELECT id FROM meta LIMIT 1`))[0]!.id;
+    for (const storeHash of ["", null]) {
+      await expect(
+        db.query(
+          `INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, store_hash, content_hash)
+           VALUES ($1, 'x86_64-linux', 'python312', $2, 1, $3, $4)`,
+          [versionId, metaId, storeHash, "4".repeat(64)],
+        ),
+        `store_hash = ${JSON.stringify(storeHash)}`,
+      ).rejects.toThrow(/variants_store_hash_nonempty|null value in column "store_hash"/);
+    }
+    // No default to fall back on either: omitting the column is an error.
+    await expect(
+      db.query(
+        `INSERT INTO variants (version_id, system, attr_path, meta_id, commit_seq, content_hash)
+         VALUES ($1, 'x86_64-linux', 'python312', $2, 1, $3)`,
+        [versionId, metaId, "4".repeat(64)],
+      ),
+    ).rejects.toThrow(/null value in column "store_hash"/);
   });
 
   test("case-insensitive name lookup uses the lower(name) index", async () => {
