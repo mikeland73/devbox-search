@@ -57,12 +57,22 @@ const nixEnvFixture = {
       insecure: true,
     },
   },
-  brokenMeta: {
-    // Missing system: Hydra assumed x86_64-linux. No outputs at all.
+  noSystem: {
+    // Missing system: Hydra assumed x86_64-linux.
     name: "weird",
     pname: "weird",
     version: "1.0",
+    outputs: { out: "/nix/store/0000000000000000000000000000000a-weird-1.0" },
     meta: {},
+  },
+  brokenStub: {
+    // What nix-env >= 2.2x emits for a package whose derivation refuses to
+    // evaluate (meta.broken without allowBroken): no meta, no outputs.
+    name: "AAI-0.2.0.1",
+    outputName: "out",
+    pname: "AAI",
+    system: "x86_64-linux",
+    version: "0.2.0.1",
   },
 } as const;
 
@@ -108,12 +118,15 @@ describe("decodeEvalJson", () => {
     expect(packageName(requests)).toBe("python3Packages.requests");
   });
 
-  test("missing system defaults to x86_64-linux; no outputs -> empty store hash", () => {
-    const weird = byAttr.get("brokenMeta")!;
+  test("missing system defaults to x86_64-linux", () => {
+    const weird = byAttr.get("noSystem")!;
     expect(weird.system).toBe("x86_64-linux");
-    expect(weird.storeHash).toBe("");
-    expect(weird.outputs).toEqual([]);
-    expect(weird.broken).toBe(false);
+    expect(weird.storeHash).toBe("0000000000000000000000000000000a");
+  });
+
+  test("a stub with no outputs (refused-to-evaluate package) is skipped, not imported unflagged", () => {
+    expect(byAttr.has("brokenStub")).toBe(false);
+    expect(eval_.count).toBe(eval_.packages.length);
   });
 
   test("hydra packages.json wrapper decodes identically", () => {
