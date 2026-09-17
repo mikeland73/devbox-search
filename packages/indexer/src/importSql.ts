@@ -89,9 +89,11 @@ export const STAGE_VERSIONS_DDL = `
     version text NOT NULL,
     sort_key bytea NOT NULL,
     prerelease boolean NOT NULL,
-    semver_major integer,
-    semver_minor integer,
-    semver_patch integer,
+    -- bigint like versions (migration 0001): nixpkgs has date-stamped
+    -- components such as 0.1.20260720092025 that overflow int4.
+    semver_major bigint,
+    semver_minor bigint,
+    semver_patch bigint,
     semver_pre text
   ) ON COMMIT DROP
 `;

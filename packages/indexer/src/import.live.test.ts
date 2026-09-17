@@ -472,6 +472,18 @@ describe("new version of an existing package", () => {
   });
 });
 
+describe("version staging", () => {
+  test("date-stamped semver components wider than int4 stage and land as bigint", async () => {
+    // nixpkgs-unstable 8b7dc2ca (2026-08-17) carries a 0.1.20260720092025-style
+    // version; the staging table used to be integer and rejected it at COPY.
+    await runImport(evalJson({ stamped: { version: "0.1.20260720092025" } }), HASH(1), DAY(1), "x86_64-linux");
+
+    expect(
+      await rows(`SELECT semver_major::int AS major, semver_minor::int AS minor, semver_patch::text AS patch FROM versions`),
+    ).toEqual([{ major: 0, minor: 1, patch: "20260720092025" }]);
+  });
+});
+
 describe("INCOMPLETE_COMMITS (discover's backfill query)", () => {
   const SYSTEMS = ["x86_64-linux", "aarch64-linux", "aarch64-darwin"];
   async function seedCommit(seq: number, hash: string, systems: string[]): Promise<void> {
