@@ -221,7 +221,15 @@ from the repo root builds green.
       inherited all 8 tables, so it needed no separate run.
 
 For any **future** migration, both branches have to be done separately —
-branching is a point-in-time copy, not ongoing replication:
+branching is a point-in-time copy, not ongoing replication. **This is
+automated** (#37): `migrate.yml` runs on every merge to `main` that touches
+`packages/db/drizzle/` and migrates staging and prod (secrets
+`DATABASE_URL_DIRECT_STAGING` / `DATABASE_URL_DIRECT_PROD`). To run it by
+hand — before a seed, or to confirm a branch is current — dispatch it from
+the Actions tab with a target; an up-to-date branch prints `up to date`. It
+shares `index.yml`'s concurrency group so DDL never runs mid-import.
+
+Locally, the same thing is:
 
 ```sh
 pnpm install
@@ -475,11 +483,13 @@ surfaced these. Each one either produced a misleading error or no error at all.
   until #30 (first real hit: `8b7dc2ca` with `0.1.20260720092025`, during
   the #20 catch-up). Any new temp/staging DDL must mirror the real types.
 - **`commit_systems.nix_version`** (migration `0003_commit_systems_nix_version`,
-  #22) records which Nix produced each imported archive. **Staging needs
-  `db migrate` before the next daily run** — as of 2026-09-17 evening staging
-  is at `0001` with `0002`/`0003` unapplied, and #23 is on `main`, so the
-  05:00 UTC import will fail on the missing column until that happens. Prod
-  gets it with the rest before its seed.
+  #22) records which Nix produced each imported archive. **A migration
+  merged is not a migration applied**: on 2026-09-17 evening staging was
+  still at `0001` with `0002`/`0003` unapplied while #23 (which writes the
+  column) was on `main`. Neon `main` was at `0003` with 2,795 commits by
+  then (restored from staging — see the `main_empty_pre_restore` branch).
+  `migrate.yml` (#37) exists so this cannot recur; its first run on merge
+  brings staging up.
 - **The PGlite test suites had `0000_init.sql` hardcoded**, so a second
   migration would never have been tested. They now apply the journal.
 - **Migration `0002_variants_store_hash_check`** (#21): `CHECK (store_hash
