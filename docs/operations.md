@@ -127,8 +127,9 @@ back to `SYSTEMS`; `eval.yml` rejects them up front.
   `ECONNREFUSED 127.0.0.1:5432` for a month. `createImportClient` now says
   `missing required environment variable` (#11).
 - **`discover` on an empty database refuses to run** (#15): with no imported
-  commits it would walk to the oldest release in the bucket. The seed must
-  run first.
+  commits it would walk to the oldest release in the bucket. Import the first
+  commit by hand (see self-hosting.md, Bootstrap); it has to be a channel
+  release commit or discover cannot anchor on it either.
 - **`semver_major/minor/patch` are `bigint`.** nixpkgs has strict-semver
   versions with a date-stamped component (`3.1.20220119140128`) that
   overflow int4.

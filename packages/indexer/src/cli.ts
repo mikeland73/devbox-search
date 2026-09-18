@@ -59,8 +59,8 @@ async function cmdDiscover(): Promise<void> {
     // cause is that the seed has not run against this database yet.
     if (known.rows.length === 0) {
       console.error(
-        "no commits in database — run the seed first (docs/self-hosting.md)." +
-          " A fresh branch also needs `db migrate` before the seed.",
+        "no commits in database — import the first commit by hand (docs/self-hosting.md, Bootstrap)." +
+          " A fresh database also needs `db migrate` before the import.",
       );
       process.exit(1);
     }
