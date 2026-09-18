@@ -112,7 +112,7 @@ jobs:
           sudo swapon "$target/eval-swapfile"
           free -h
 
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v23
         with:
           # Always the x86_64-linux tarball: this is the runner's platform.
           # matrix.system is only what nix-env is asked to evaluate for.
