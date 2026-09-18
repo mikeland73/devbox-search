@@ -5,3 +5,8 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
   sharp: true
+# Security floors for transitive deps whose parents pin vulnerable versions
+# (next pins postcss exactly; @esbuild-kit/core-utils pins esbuild 0.18).
+overrides:
+  "next>postcss": "^8.5.23"
+  "@esbuild-kit/core-utils>esbuild": "^0.25.0"
