@@ -59,6 +59,9 @@ async function get(path) {
   const res = await fetch(BASE_URL + path, {
     signal: AbortSignal.timeout(60_000),
     headers: { "User-Agent": "devbox-search-integration" },
+    // The Go service never redirected, so a 3xx is a finding, not a hop to
+    // follow: `/pkg/` → 308 → `/pkg` → 400 would otherwise pass as a 400.
+    redirect: "manual",
   });
   const text = await res.text();
   const contentType = res.headers.get("content-type") ?? "";
@@ -153,6 +156,22 @@ test("GET /status reports a fully indexed database", async () => {
     [...body.systems.map((s) => s.system)].sort(),
     "systems are sorted by name",
   );
+});
+
+// Go path.Clean'd every request path, so a trailing slash reached the same
+// handler as the bare path. Next.js would 308 these to the slash-less form
+// unless told not to (skipTrailingSlashRedirect, #45).
+test("trailing slashes are served, not redirected", async () => {
+  assert.equal((await get("/readyz/")).status, 200, "/readyz/");
+  assertError(
+    await get("/pkg/"),
+    400,
+    "400 Bad Request: empty name (set a ?name=<value> query parameter)",
+    "/pkg/",
+  );
+  const path = "/v2/resolve/?name=go&version=1.22";
+  const body = okJson(await get(path), path);
+  assert.equal(body.version, GO_1_22.version);
 });
 
 // ---------------------------------------------------------------------------
