@@ -115,7 +115,10 @@ jobs:
 
   eval:
     needs: discover
-    if: needs.discover.outputs.evals != '[]'
+    # A custom `if` replaces the implicit success() gate, and a discover that
+    # died before `plan` leaves `evals` empty — which is != '[]'. Check the
+    # result explicitly, like import does, so that fails cleanly as a skip.
+    if: needs.discover.result == 'success' && needs.discover.outputs.evals != '[]'
     strategy:
       fail-fast: false
       matrix:
