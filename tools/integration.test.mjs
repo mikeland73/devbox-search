@@ -355,6 +355,38 @@ test("latest is the current release, not a date snapshot the attribute moved on 
   assert.notEqual(okJson(await get(ebtks), ebtks).version, "2017-09-23");
 });
 
+test("python@latest is the interpreter nixpkgs-unstable ships, not a stale line (#49)", async (t) => {
+  // Top-level `python314` was hidden from every eval by nix-env's dedup once
+  // buildbotPackages.python aliased it, so the index stopped at 3.14.4 from
+  // May 2026 while nixpkgs moved on. Until an import produced by the fixed
+  // eval (devbox-search-indexer eval.nix) has run, the index simply has no
+  // newer 3.14.x under `python`, and there is nothing for `latest` to get
+  // right or wrong — so the check arms itself: once a 3.14.5+ exists under
+  // a top-level attribute, `latest` must be it (or newer) and current.
+  const listing = okJson(await get("/v2/pkg?name=python"), "/v2/pkg?name=python");
+  const release = (v) => /^\d+\.\d+\.\d+$/.test(v) && v.split(".").map(Number);
+  const newerThan = (a, b) => (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) > 0;
+  const fixed = listing.releases.some((r) => release(r.version) && newerThan(release(r.version), [3, 14, 4]));
+  if (!fixed) {
+    t.skip("index has no python 3.14.5+ yet: the fixed eval has not been imported");
+    return;
+  }
+
+  const path = "/v2/resolve?name=python&version=latest";
+  const body = okJson(await get(path), path);
+  assert.match(body.version, /^3\.(1[4-9]|[2-9]\d)\.\d+$/, `python@latest: ${body.version}`);
+  const status = okJson(await get("/status"), "/status");
+  for (const system of INDEXED_SYSTEMS) {
+    const info = body.systems[system];
+    assert.ok(info, `missing system ${system}`);
+    assert.match(info.flake_installable.attr_path, /^python3\d\d$/, `${system} attr_path`);
+  }
+  // Present at head: last_updated is at most a few imports old, never May.
+  const newest = new Date(status.newest_commit.committed_at);
+  const age = newest - new Date(body.systems["x86_64-linux"].last_updated);
+  assert.ok(age <= 14 * 86_400_000, `python@latest last_updated is ${Math.round(age / 86_400_000)} days behind the head`);
+});
+
 test("GET /v1/resolve?name=python&version=3.11&system=x86_64-linux filters by system", async () => {
   const path = "/v1/resolve?name=python&version=3.11&system=x86_64-linux";
   const body = okJson(await get(path), path);
