@@ -56,6 +56,13 @@ critical path.
   `Content-Type: text/plain; charset=utf-8`,
   `X-Content-Type-Options: nosniff` and
   `Cache-Control: public, max-age=0, s-maxage=60`.
+* **Rate limit.** The public deployment allows 1000 requests per 10
+  minutes per client IP across every endpoint except `/readyz`; over
+  that, requests get `429 Too Many Requests` from the Vercel edge (not
+  the plain-text form above) until the window resets. Cached responses
+  count too. The limit is enforced by the Vercel WAF, not the route
+  handlers, so a self-hosted copy has none unless its deployment adds
+  one (`docs/operations.md`).
 * **Timestamps.** v2 endpoints use RFC 3339 without fractional seconds
   (`2026-01-03T00:00:00Z`); v1 endpoints use Unix seconds as a JSON
   number.
