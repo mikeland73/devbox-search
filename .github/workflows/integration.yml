@@ -39,7 +39,7 @@ jobs:
         with:
           # The commit that was deployed, not whatever the branch has moved to.
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
