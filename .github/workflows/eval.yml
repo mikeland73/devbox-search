@@ -88,7 +88,7 @@ jobs:
             *) echo "unsupported system '${{ matrix.system }}': must be one of x86_64-linux, aarch64-linux, aarch64-darwin"; exit 1 ;;
           esac
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           sparse-checkout: eval.nix
           sparse-checkout-cone-mode: false
@@ -112,7 +112,7 @@ jobs:
           sudo swapon "$target/eval-swapfile"
           free -h
 
-      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/nix-installer-action@v23
         with:
           # Always the x86_64-linux tarball: this is the runner's platform.
           # matrix.system is only what nix-env is asked to evaluate for.
@@ -169,7 +169,7 @@ jobs:
           mv eval.json.gz "$dir/"
           echo "${{ steps.nix.outputs.version }}" > "$dir/nix-version"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: eval-${{ matrix.system }}-${{ inputs.commit }}
           path: eval-${{ matrix.system }}-${{ inputs.commit }}
