@@ -31,8 +31,12 @@ interface RangeRow {
   attr_path: string;
   first_seq: number;
   last_seq: number | null;
-  /** The newest commit imported for this system: the bound of an open range. */
-  head_seq: number;
+  /**
+   * The newest commit imported for this system: the bound of an open range.
+   * Null only if the system has never been imported, which a live range
+   * rules out; treated as "no interval" rather than trusted.
+   */
+  head_seq: number | null;
 }
 
 /**
@@ -75,8 +79,10 @@ export async function singleHashAcrossSystems(pkgs: ResultPackage[]): Promise<Re
   const perSystem = new Map<string, Array<{ lo: number; hi: number }>>();
   for (const row of ranges) {
     if (bySystem.get(row.system)?.attrPath !== row.attr_path) continue;
+    const hi = row.last_seq ?? row.head_seq;
+    if (hi === null) continue;
     const list = perSystem.get(row.system) ?? [];
-    list.push({ lo: row.first_seq, hi: row.last_seq ?? row.head_seq });
+    list.push({ lo: row.first_seq, hi });
     perSystem.set(row.system, list);
   }
   const unified = [...perSystem.keys()];

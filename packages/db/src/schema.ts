@@ -254,7 +254,8 @@ export const variants = pgTable(
  * compact DB carries no history. They say nothing about presence, so the
  * query layer ignores them wherever presence matters (single-hash
  * resolution, `latest`); a system with only seeded ranges keeps its
- * per-system commit.
+ * per-system commit, as does every system when fewer than two have live
+ * ranges to unify.
  */
 export const variantRanges = pgTable(
   "variant_ranges",
