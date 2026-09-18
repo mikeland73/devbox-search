@@ -67,7 +67,7 @@ jobs:
       ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       BUCKET: ${{ secrets.R2_BUCKET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -146,7 +146,7 @@ jobs:
       BUCKET: ${{ secrets.R2_BUCKET }}
       COMMITS: ${{ needs.discover.outputs.commits }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:

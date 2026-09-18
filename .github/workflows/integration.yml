@@ -35,7 +35,7 @@ jobs:
       BASE_URL: ${{ github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
       ENVIRONMENT: ${{ github.event.deployment.environment }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The commit that was deployed, not whatever the branch has moved to.
           ref: ${{ github.sha }}
