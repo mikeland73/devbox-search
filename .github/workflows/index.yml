@@ -157,7 +157,7 @@ jobs:
 
       # Evals produced by this run, already in the eval-{system}-{hash}/
       # layout the importer reads (eval.yml stages them that way).
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: eval-*
           path: evals
