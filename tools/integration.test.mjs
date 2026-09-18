@@ -374,7 +374,7 @@ test("python@latest is the interpreter nixpkgs-unstable ships, not a stale line 
   // Top-level `python314` was hidden from every eval by nix-env's dedup once
   // buildbotPackages.python aliased it, so the index stopped at 3.14.4 from
   // May 2026 while nixpkgs moved on. Until an import produced by the fixed
-  // eval (devbox-search-indexer eval.nix) has run, the index simply has no
+  // eval (eval.nix, #49) has run, the index simply has no
   // newer 3.14.x under `python`, and there is nothing for `latest` to get
   // right or wrong — so the check arms itself: once a 3.14.5+ exists under
   // a top-level attribute, `latest` must be it (or newer) and current.

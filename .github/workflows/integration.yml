@@ -10,7 +10,7 @@
 # check on the head commit; on main it checks the production deployment
 # (the unique deployment URL, which is the same build the production alias
 # points at). Deployment Protection is off on the project, so preview URLs
-# are reachable without a bypass header (see the runbook).
+# are reachable without a bypass header (see docs/operations.md).
 #
 # What is checked lives in tools/integration.test.mjs; run it by hand with
 # BASE_URL=https://... node --test tools/integration.test.mjs.

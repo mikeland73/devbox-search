@@ -3,10 +3,11 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+!.env.example
 .context/
 coverage/
 .next/
 next-env.d.ts
 .vercel/
 .vercel
-.env*
+.devbox/

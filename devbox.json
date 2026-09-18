@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.18.3/.schema/devbox.schema.json",
+  "packages": [
+    "nodejs@24",
+    "pnpm@11.8.0",
+    "postgresql@17",
+    "awscli2@latest",
+    "jq@latest"
+  ],
+  "env": {
+    "COREPACK_ENABLE_STRICT": "0"
+  },
+  "shell": {
+    "init_hook": [
+      "test -d node_modules || echo 'run `devbox run setup` to install and build'"
+    ],
+    "scripts": {
+      "setup": [
+        "pnpm install --frozen-lockfile",
+        "pnpm -r build"
+      ],
+      "build": "pnpm -r build",
+      "test": "pnpm test",
+      "lint": "pnpm lint",
+      "typecheck": "pnpm typecheck",
+      "check": [
+        "pnpm lint",
+        "pnpm typecheck",
+        "pnpm test"
+      ],
+      "dev": "pnpm --filter @devbox-search/web dev",
+      "migrate": [
+        "pnpm --filter '@devbox-search/db...' build",
+        "pnpm --filter @devbox-search/db migrate"
+      ],
+      "index": "node packages/indexer/dist/cli.js \"$@\"",
+      "gen-api-docs": "pnpm --filter @devbox-search/web gen:api-docs"
+    }
+  }
+}

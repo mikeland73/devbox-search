@@ -1,6 +1,6 @@
 # Serving query plans
 
-Recorded 2026-09-18 against `ep-purple-river-auzjl04j.c-10.us-east-1.aws.neon.tech` with `node tools/explain-plans.mjs`.
+Recorded 2026-09-18 against the production database with `node tools/explain-plans.mjs`.
 Regenerate after changing apps/web/lib/search.ts or the indexes, and diff.
 Warm plans (second run); see the script for what each statement is.
 
