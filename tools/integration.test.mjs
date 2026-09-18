@@ -332,6 +332,29 @@ test("GET /v2/resolve?name=go&version=latest", async () => {
   }
 });
 
+test("latest is the current release, not a date snapshot the attribute moved on from (#44)", async () => {
+  // Each of these has an old `YYYY-MM-DD` snapshot that compares above its
+  // real releases. Moving expectations: the release may advance, but it
+  // can never go back to the snapshot.
+  for (const [name, snapshot, release] of [
+    ["go-font", "2017-03-30", /^2\.\d/],
+    ["age", "2020-03-25", /^1\.\d/],
+    ["alejandra", "2022-02-12", /^[4-9]\.\d/],
+    ["go-mtpfs", "2018-02-09", /^1\.\d/],
+  ]) {
+    const path = `/v2/resolve?name=${name}&version=latest`;
+    const body = okJson(await get(path), path);
+    assert.notEqual(body.version, snapshot, `${name}: resolved to the snapshot`);
+    assert.match(body.version, release, `${name}: ${body.version}`);
+  }
+  // And the other way round: mod_python's snapshot replaced its last release.
+  const path = "/v2/resolve?name=mod_python&version=latest";
+  assert.match(okJson(await get(path), path).version, /^\d{4}-\d{2}-\d{2}$/);
+  // A renamed attribute path (EBTKS → ebtks) must not keep its last version.
+  const ebtks = "/v2/resolve?name=ebtks&version=latest";
+  assert.notEqual(okJson(await get(ebtks), ebtks).version, "2017-09-23");
+});
+
 test("GET /v1/resolve?name=python&version=3.11&system=x86_64-linux filters by system", async () => {
   const path = "/v1/resolve?name=python&version=3.11&system=x86_64-linux";
   const body = okJson(await get(path), path);

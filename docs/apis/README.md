@@ -30,9 +30,13 @@ critical path.
   canonical package name *case-insensitively* or a nixpkgs attribute path
   *case-sensitively* (`python`, `python311`, `nodePackages.typescript`).
 * **Version matching** (`version` / `v` parameters):
-  * `latest` — the highest non-prerelease version, preferring one that is
-    not marked broken; if no non-prerelease version exists, the highest
-    prerelease.
+  * `latest` — the highest non-prerelease version still present in
+    nixpkgs, preferring one that is not marked broken. A version nixpkgs
+    has dropped or renamed away from (go-font's `2017-03-30` snapshot,
+    replaced by `2.010`) is not `latest` however it compares as a string;
+    a package nixpkgs no longer carries at all resolves to its most
+    recently seen version. If no non-prerelease version exists, the same
+    rule over prereleases.
   * an exact version — `3.11.9`.
   * a partial version, treated as a range on dot boundaries —
     `3` ⇒ `>=3.0.0 <4.0.0`, `3.11` ⇒ `>=3.11.0 <3.12.0` (so `3.1` does
