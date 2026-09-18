@@ -14,6 +14,9 @@ on:
       - .github/workflows/migrate.yml
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # Never run DDL mid-import: ADD CONSTRAINT takes an exclusive lock on a 3.8M-row
 # table. Same group as index.yml, so the two serialize across workflows.
 concurrency:

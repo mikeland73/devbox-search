@@ -1,0 +1,213 @@
+# Evaluates one nixpkgs commit with nix-env, one job per system.
+#
+# Called by index.yml for every (commit, system) the daily run finds missing,
+# and dispatchable by hand for a one-off eval. Each job needs ~15 GB of RAM:
+# GitHub's public-repo `ubuntu-latest` runners have 4 vCPU / 16 GB, and the
+# adaptive swapfile below covers the rest. (A private repo's 2 vCPU / 7 GB
+# runners do not fit the eval even with swap — which is why this workflow
+# used to live in a separate public repository.)
+#
+# Each eval is uploaded as a workflow artifact named eval-{system}-{hash}
+# holding eval.json.gz and a nix-version sidecar — the layout the importer
+# reads. When the R2_* secrets are set it is also archived to the bucket at
+# {system}/{committer-unix-seconds}-{hash}.json.gz, so a later run (or a
+# fresh database) can import it without re-evaluating; listing a prefix
+# returns commits in chronological order. The archive is optional.
+name: eval
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: "Full nixpkgs commit hash (40 hex chars)"
+        required: true
+        type: string
+      committed_at:
+        description: "Committer date, ISO 8601 (e.g. 2026-08-13T03:55:42Z)"
+        required: true
+        type: string
+      systems:
+        description: "JSON array of Nix systems to evaluate"
+        required: false
+        type: string
+        default: '["x86_64-linux","aarch64-linux","aarch64-darwin"]'
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Full nixpkgs commit hash (40 hex chars)"
+        required: true
+      committed_at:
+        description: "Committer date, ISO 8601 (e.g. 2026-08-13T03:55:42Z)"
+        required: true
+      systems:
+        # No x86_64-darwin: nixpkgs 26.11 dropped it and nix-env errors out.
+        description: "JSON array of Nix systems to evaluate"
+        required: false
+        default: '["x86_64-linux","aarch64-linux","aarch64-darwin"]'
+
+permissions:
+  contents: read
+
+env:
+  # The Nix that runs the eval. Pinned because the output shape is nix-env
+  # behaviour, not ours: e.g. newer nix-env lists packages that refuse to
+  # evaluate as stubs where older versions dropped them, which showed up
+  # downstream only as odd import counts (#19). Bump this on purpose, and
+  # check the importer against a sample of the new output first. Each eval
+  # is stamped with the version that produced it (see below).
+  NIX_VERSION: 2.35.2
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    # One eval at a time per (commit, system); unrelated commits may overlap.
+    concurrency:
+      group: eval-${{ inputs.commit }}-${{ matrix.system }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        system: ${{ fromJSON(inputs.systems) }}
+    env:
+      # Set from secrets so the archive steps can test for it: `secrets` is
+      # not available in a step's `if`, `env` is.
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+    steps:
+      # `systems` is free-form, so check each matrix entry against the same
+      # list as the default before spending a runner on it. x86_64-darwin is
+      # rejected on purpose: nixpkgs 26.11 dropped it and nix-env errors out.
+      # (Commits before the drop would still evaluate; re-add it here if that
+      # history is ever backfilled.)
+      - name: Validate inputs
+        run: |
+          [[ "${{ inputs.commit }}" =~ ^[0-9a-f]{40}$ ]] || { echo "commit must be a full 40-hex sha"; exit 1; }
+          date -u -d "${{ inputs.committed_at }}" +%s > /dev/null || { echo "committed_at must be an ISO 8601 date"; exit 1; }
+          case "${{ matrix.system }}" in
+            x86_64-linux|aarch64-linux|aarch64-darwin) ;;
+            *) echo "unsupported system '${{ matrix.system }}': must be one of x86_64-linux, aarch64-linux, aarch64-darwin"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: eval.nix
+          sparse-checkout-cone-mode: false
+
+      # The runner image changes under us: it ships an active /swapfile, and
+      # /mnt is not a separate disk. Pick the filesystem with the most free
+      # space, cap at 16 GB, and leave 8 GB for the checkout and output.
+      - name: Add swapfile
+        run: |
+          swapon --show; df -h / /mnt 2>/dev/null || true
+          target=$(df --output=target,avail -B1 / /mnt 2>/dev/null | tail -n +2 | sort -k2 -n | tail -1 | awk '{print $1}')
+          avail=$(df --output=avail -B1 "$target" | tail -1)
+          size=$(( avail - 8 * 1024 * 1024 * 1024 ))
+          cap=$(( 16 * 1024 * 1024 * 1024 ))
+          [ "$size" -gt "$cap" ] && size=$cap
+          if [ "$size" -lt $(( 2 * 1024 * 1024 * 1024 )) ]; then echo "not enough free space on $target for a useful swapfile"; exit 1; fi
+          echo "adding $(( size / 1024 / 1024 / 1024 )) GB swap on $target"
+          sudo fallocate -l "$size" "$target/eval-swapfile"
+          sudo chmod 600 "$target/eval-swapfile"
+          sudo mkswap "$target/eval-swapfile" > /dev/null
+          sudo swapon "$target/eval-swapfile"
+          free -h
+
+      - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          # Always the x86_64-linux tarball: this is the runner's platform.
+          # matrix.system is only what nix-env is asked to evaluate for.
+          nix-package-url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/nix-${{ env.NIX_VERSION }}-x86_64-linux.tar.xz
+
+      # Fail fast if the installer did not honour the pin: an eval with the
+      # wrong Nix would be archived and imported before anyone noticed.
+      - name: Check Nix version
+        id: nix
+        run: |
+          nix --version | tee -a "$GITHUB_STEP_SUMMARY"
+          installed=$(nix --version | awk '{print $NF}')
+          [ "$installed" = "$NIX_VERSION" ] || { echo "installed nix $installed, expected $NIX_VERSION"; exit 1; }
+          echo "version=$installed" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch nixpkgs
+        run: |
+          curl -fsSL "https://codeload.github.com/NixOS/nixpkgs/tar.gz/${{ inputs.commit }}" -o nixpkgs.tar.gz
+          mkdir nixpkgs
+          tar -xzf nixpkgs.tar.gz --strip-components=1 -C nixpkgs
+          rm nixpkgs.tar.gz
+
+      - name: Evaluate
+        env:
+          # Nix's GC does badly with a small initial heap on a big eval.
+          GC_INITIAL_HEAP_SIZE: 6G
+        run: |
+          set -o pipefail
+          # The exact nix-env invocation the importer expects. eval.nix is
+          # nixpkgs with every top-level derivation made visible to nix-env's
+          # dedup (see the comment there). packages-config.nix makes nix-env
+          # descend into attribute sets it would otherwise skip (e.g.
+          # nodePackages.*); the rest lets it see unfree/insecure packages.
+          config='{ allowInsecure = true; allowInsecurePredicate = (pkg: true); allowUnfree = true; allowUnfreePredicate = (pkg: true); }'
+          if [ -f nixpkgs/pkgs/top-level/packages-config.nix ]; then
+            config="(import ./nixpkgs/pkgs/top-level/packages-config.nix) // $config"
+          fi
+          /usr/bin/time -v nix-env \
+            --file ./eval.nix \
+            --query --available --meta --out-path --show-trace --json \
+            --arg config "$config" \
+            --argstr system "${{ matrix.system }}" \
+            2> time.log | gzip -9 > eval.json.gz \
+            || { tail -50 time.log; exit 1; }
+          grep -E "Maximum resident|Elapsed|Exit status" time.log
+          ls -l eval.json.gz
+
+      # The importer's layout: evals/eval-{system}-{hash}/{eval.json.gz,nix-version}.
+      # index.yml downloads every eval-* artifact of the run into evals/.
+      - name: Stage for upload
+        run: |
+          dir="eval-${{ matrix.system }}-${{ inputs.commit }}"
+          mkdir "$dir"
+          mv eval.json.gz "$dir/"
+          echo "${{ steps.nix.outputs.version }}" > "$dir/nix-version"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ matrix.system }}-${{ inputs.commit }}
+          path: eval-${{ matrix.system }}-${{ inputs.commit }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Archive to R2
+        if: env.R2_BUCKET != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          key="${{ matrix.system }}/$(date -u -d "${{ inputs.committed_at }}" +%s)-${{ inputs.commit }}.json.gz"
+          # x-amz-meta-nix-version: the importer reads it via head-object and
+          # records it next to the import, so a Nix change is traceable.
+          aws --endpoint-url "${{ secrets.R2_ENDPOINT }}" s3 cp \
+            "eval-${{ matrix.system }}-${{ inputs.commit }}/eval.json.gz" "s3://$R2_BUCKET/$key" \
+            --metadata "nix-version=${{ steps.nix.outputs.version }}"
+          echo "archived $key (nix ${{ steps.nix.outputs.version }})" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Summary
+        run: grep -E "Maximum resident|Elapsed" time.log >> "$GITHUB_STEP_SUMMARY"
+
+      # Peak RSS was 14.6 GB on the 15 GB runner and nixpkgs only grows.
+      # Once the eval no longer fits, the swapfile keeps it alive but wall time
+      # goes from minutes to tens of minutes, and nothing else would flag it.
+      # Fail when headroom drops under 500 MB so the drift shows up as a red
+      # run. Runs after the upload so the output is still importable.
+      - name: Check memory headroom
+        run: |
+          peak_kb=$(awk '/Maximum resident set size/ {print $NF}' time.log)
+          total_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          if [ -z "$peak_kb" ] || [ -z "$total_kb" ]; then echo "could not read peak RSS or total RAM"; exit 1; fi
+          headroom_mb=$(( (total_kb - peak_kb) / 1024 ))
+          echo "peak RSS $(( peak_kb / 1024 )) MB of $(( total_kb / 1024 )) MB RAM, headroom $headroom_mb MB" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$headroom_mb" -lt 500 ]; then
+            echo "::error::eval peak RSS is within 500 MB of total RAM; see docs/operations.md for the fallbacks"
+            exit 1
+          fi
