@@ -129,8 +129,12 @@ it exists.
 **Single hash across systems.** When the same version is present on
 several systems, the newest nixpkgs commit that contains it on
 *every* returned system is chosen and emitted as the `rev` for all
-of them, so one `nix` fetch serves every platform. If no such commit
-is known, each system reports the commit of its own last change.
+of them, so one `nix` fetch serves every platform. For a version
+still in nixpkgs that is the newest imported commit, so `rev` and
+`last_updated` advance with the index. Only systems indexed since
+the migration take part; a system frozen at the migration seed
+(x86_64-darwin) reports the commit of its own last change, as does
+every system when no common commit is known.
 
 Methods: `GET`, `HEAD`, `OPTIONS`
 
