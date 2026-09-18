@@ -10,16 +10,18 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { isPrerelease, parseSemver, sha256Hex, sortKey } from "@devbox-search/core";
 import {
+  commitSystems,
   commits,
   meta,
   migrationStatements,
   packages,
   schema,
   searchTerms,
+  variantRanges,
   variants,
   versions,
 } from "@devbox-search/db";
@@ -50,6 +52,7 @@ export async function createTestDb(): Promise<TestDb> {
 }
 
 export interface FixtureVersion {
+  /** May repeat within a package: entries for the same version string share one versions row. */
   version: string;
   /** Defaults to every system in {@link SYSTEMS}. */
   systems?: string[];
@@ -57,6 +60,19 @@ export interface FixtureVersion {
   attrPath?: string;
   /** Commit seq of the last content change; defaults to 1. */
   commitSeq?: number;
+  /**
+   * Commit seq the version was last present in. Defaults to still present:
+   * an open range from `commitSeq`, as the importer leaves a variant that is
+   * in the newest eval. Set it to model a version nixpkgs has since dropped,
+   * either everywhere or (as a per-system map) on some systems only.
+   */
+  lastSeq?: number | Partial<Record<string, number>>;
+  /**
+   * Model a row from the one-time sqlite seed: a point range at `commitSeq`
+   * flagged `seeded`, which records a content change, not presence (the
+   * compact DB had no history). `lastSeq` is ignored.
+   */
+  seeded?: boolean;
   broken?: boolean;
 }
 
@@ -83,6 +99,19 @@ export async function seedCommits(db: SearchDb, n = 1): Promise<void> {
   );
 }
 
+/**
+ * Records which commits were imported for each system: every seq from 1 to
+ * the given head, as the importer does. A system whose head is below the
+ * newest commit models one frozen at an older eval (x86_64-darwin).
+ */
+export async function seedCommitSystems(db: SearchDb, heads: Record<string, number>): Promise<void> {
+  await db.insert(commitSystems).values(
+    Object.entries(heads).flatMap(([system, head]) =>
+      Array.from({ length: head }, (_, i) => ({ commitSeq: i + 1, system })),
+    ),
+  );
+}
+
 /** Inserts one package with its versions, variants, meta and search terms. */
 export async function seedPackage(db: SearchDb, fixture: FixturePackage): Promise<void> {
   const [pkg] = await db.insert(packages).values({ name: fixture.name }).returning({ id: packages.id });
@@ -103,7 +132,7 @@ export async function seedPackage(db: SearchDb, fixture: FixturePackage): Promis
   const attrPaths = new Set<string>();
   for (const v of fixture.versions) {
     const semver = parseSemver(v.version);
-    const [ver] = await db
+    const [inserted] = await db
       .insert(versions)
       .values({
         packageId,
@@ -115,13 +144,22 @@ export async function seedPackage(db: SearchDb, fixture: FixturePackage): Promis
         semverPatch: semver?.patch ?? null,
         semverPre: semver?.prerelease ?? null,
       })
+      .onConflictDoNothing()
       .returning({ id: versions.id });
+    const ver =
+      inserted ??
+      (
+        await db
+          .select({ id: versions.id })
+          .from(versions)
+          .where(and(eq(versions.packageId, packageId), eq(versions.version, v.version)))
+      )[0];
 
     const attrPath = v.attrPath ?? fixture.name;
     attrPaths.add(attrPath);
     for (const system of v.systems ?? SYSTEMS) {
       const ident = `${fixture.name}-${v.version}-${system}`;
-      await db.insert(variants).values({
+      const [variant] = await db.insert(variants).values({
         versionId: ver!.id,
         system,
         attrPath,
@@ -134,6 +172,14 @@ export async function seedPackage(db: SearchDb, fixture: FixturePackage): Promis
         broken: v.broken ?? false,
         outputs: [{ name: "out", path: `/nix/store/${sha256Hex(ident).slice(0, 32)}-${ident}`, default: true }],
         contentHash: sha256Hex(ident),
+      }).returning({ id: variants.id });
+      const commitSeq = v.commitSeq ?? 1;
+      const lastSeq = typeof v.lastSeq === "object" ? v.lastSeq[system] : v.lastSeq;
+      await db.insert(variantRanges).values({
+        variantId: variant!.id,
+        firstSeq: commitSeq,
+        lastSeq: v.seeded ? commitSeq : (lastSeq ?? null),
+        seeded: v.seeded ?? false,
       });
     }
   }

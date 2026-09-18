@@ -71,17 +71,23 @@ const RESULT_COLUMNS = `"packages"."name", "versions"."version", commit_hash.has
 
 const RESULT_JOINS = `inner join "versions" on "versions"."id" = "variants"."version_id" inner join "packages" on "packages"."id" = "versions"."package_id" inner join "meta" on "meta"."id" = "variants"."meta_id" inner join commits AS commit_hash on commit_hash.seq = "variants"."commit_seq"`;
 
+/** latestOrder: non-broken first, then newest live presence, then version. */
+const LATEST_ORDER = `EXISTS (SELECT 1 FROM "variants" b WHERE b.version_id = "versions"."id" AND NOT b.broken) desc, (
+    SELECT coalesce(max(coalesce(r.last_seq, 2147483647)), 0)
+    FROM "variant_ranges" r
+    WHERE r.variant_id = "variants"."id" AND NOT r.seeded
+  ) desc, "versions"."sort_key" desc`;
+
 /** searchByPhrase, latest: one query for every ranked hit, one row per package. */
 const PHRASE_LATEST = `
 select distinct on (hits.ord) ${RESULT_COLUMNS}
 from unnest(string_to_array($1, ',')::int[]) WITH ORDINALITY AS hits(package_id, ord)
 inner join LATERAL (
-  SELECT v.id AS version_id
-  FROM "versions" v
-  WHERE v.package_id = hits.package_id AND v.prerelease = false
-  ORDER BY
-    EXISTS (SELECT 1 FROM "variants" b WHERE b.version_id = v.id AND NOT b.broken) DESC,
-    v.sort_key DESC
+  SELECT "versions"."id" AS version_id
+  FROM "variants"
+  JOIN "versions" ON "versions"."id" = "variants"."version_id"
+  WHERE "versions"."package_id" = hits.package_id AND "versions"."prerelease" = false
+  ORDER BY ${LATEST_ORDER}
   LIMIT 1
 ) AS latest on true
 inner join "variants" on "variants"."version_id" = latest.version_id
@@ -112,13 +118,13 @@ const TARGET = `"variants"."id" IN (
   SELECT va.id FROM "variants" va WHERE va.attr_path = $1
 )`;
 
-/** pickLatestVersionId (non-broken pass), the first query of resolve@latest. */
+/** pickLatestVersionId, the first query of resolve@latest. */
 const PICK_LATEST = `
 select "versions"."id" from "variants"
 inner join "versions" on "versions"."id" = "variants"."version_id"
 inner join "packages" on "packages"."id" = "versions"."package_id"
-where (${TARGET} and "versions"."prerelease" = false and "variants"."broken" = false)
-order by "versions"."sort_key" desc limit 1`;
+where (${TARGET} and "versions"."prerelease" = false)
+order by ${LATEST_ORDER} limit 1`;
 
 /** searchByName: every version of a package (/v2/pkg, /v1/pkg). */
 const BY_NAME = `
@@ -178,6 +184,10 @@ print("  `Seq Scan on variants` here means the name/attr_path predicate has beco
 print("  across two tables again (#26: ~4 s per lookup).");
 print("- **Batched fetch** must be one `Nested Loop` over `hits` with an index scan on");
 print("  `versions (package_id, ...)` per hit — never one query per hit.");
+print("- **Latest** (pick latest version, batched fetch latest) sorts one package's variant");
+print("  rows with a `SubPlan` per row on `variant_ranges_pkey` (#44). A few hundred index");
+print("  probes; a `Seq Scan on variant_ranges` would mean the presence subquery lost its");
+print("  `variant_id =` correlation.");
 print("- **Ranked terms** is two tiers. The `prefix` CTE's filter must be the two `LIKE`s");
 print("  only — a `BitmapOr` of `search_terms_name_lower_idx` and `search_terms_attr_path_lower_idx`");
 print("  for narrow phrases (`go`), a plain seq scan when a quarter of the table matches");

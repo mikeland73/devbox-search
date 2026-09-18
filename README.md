@@ -60,6 +60,15 @@ The old Go service compared versions with a semver → PEP 440 → simple-split
 cascade that was not transitive. This port replaces it with a single clean
 total order (close to Nix's `builtins.compareVersions`, with prerelease tags
 sorting below their release) that is encoded into a byte-comparable
-`sort_key`, so "latest" is a plain `max(sort_key)` in SQL. See
+`sort_key`, so version order is a plain `ORDER BY sort_key` in SQL. See
 `packages/core/src/version.ts` for the full ordering rules and the
 intentionally-diverged Go test vectors.
+
+`latest` is not simply `max(sort_key)`: nixpkgs versions snapshots as dates
+(`2017-03-30`), which compare above any numeric release, and no string rule
+can tell an old snapshot from a new one (go-font went `2017-03-30` → `2.010`,
+mod_python went `3.5.0` → `2022-10-18`). `apps/web/lib/search.ts` instead
+asks `variant_ranges` which versions nixpkgs still has: `latest` is the
+highest version present in the newest import (falling back to the most
+recently present one), preferring a non-broken one. Seeded point ranges
+carry no presence information and are ignored.

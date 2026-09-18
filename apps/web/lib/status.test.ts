@@ -65,7 +65,7 @@ describe("status", () => {
       packages: 2,
       versions: 3,
       variants: 4,
-      variant_ranges: 0,
+      variant_ranges: 4, // one open range per variant (see FixtureVersion.lastSeq)
       meta: 2,
       search_terms: 2,
       commits: 3,

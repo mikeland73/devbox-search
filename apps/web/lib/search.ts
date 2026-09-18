@@ -10,8 +10,9 @@
  *   - name matching is case-insensitive, attr_path matching is
  *     case-sensitive, and the two are ORed: `name = ?1 OR attr_path = ?1`;
  *   - every input string is NFD-normalized and trimmed, exactly as at ingest;
- *   - `latest` means the highest non-prerelease version, with the handler
- *     retrying including prereleases when that is empty.
+ *   - `latest` means the highest non-prerelease version still present in
+ *     nixpkgs (see latestOrder), with the handler retrying including
+ *     prereleases when that is empty.
  *
  * Sanctioned changes implemented here:
  *   #1 dot-boundary version matching (a partial version is a range, not a raw
@@ -130,6 +131,57 @@ function nameOrAttrPath(term: string): SQL {
   )`;
 }
 
+/**
+ * The newest commit seq a variant was seen in, from its live presence ranges:
+ * an open range (the variant is in the newest import of its system) counts
+ * as newer than any closed one. Seeded ranges are ignored — they are point
+ * ranges at the last *content change* of a row, not presence (the compact DB
+ * carried no history) — so a variant with only seeded history is older than
+ * anything observed since the migration, and every such variant ties.
+ */
+function lastSeen(variantId: SQL): SQL<number> {
+  return sql<number>`(
+    SELECT coalesce(max(coalesce(r.last_seq, 2147483647)), 0)
+    FROM ${schema.variantRanges} r
+    WHERE r.variant_id = ${variantId} AND NOT r.seeded
+  )`;
+}
+
+/**
+ * The ordering that picks `latest`, over variant rows joined to versions.
+ *
+ * A version string alone cannot say which release is current: nixpkgs
+ * versions snapshots as dates (`2017-03-30`), the comparator ranks a date
+ * above any numeric release, and so by sort_key alone go-font's `latest` is a
+ * 2017 snapshot rather than 2.010 — while packages that went the other way
+ * (mod_python 3.5.0 → 2022-10-18) are just as real, so no string rule can
+ * separate an old snapshot from a new one (#44).
+ *
+ * What does separate them is nixpkgs itself: the newest commit each version
+ * was present in. So `latest` is, in order,
+ *
+ *   1. a version with a non-broken variant in scope (sanctioned change #3,
+ *      the two-pass lookup the old service did, as one ordering);
+ *   2. the version most recently present — every version still in the newest
+ *      import ties here, and a version nixpkgs dropped (or renamed the
+ *      attribute of) loses to any that is still there;
+ *   3. the highest version, which is the only rule that applies when a
+ *      package is served by several attribute paths at once (python312,
+ *      python313, …), or when nothing has been seen since the migration
+ *      (a package gone before the seed, or a frozen system's history).
+ *
+ * Presence is judged per variant row, so a system filter narrows it too:
+ * "latest on x86_64-linux" is what that system's evals still list.
+ */
+function latestOrder(system: string | undefined): SQL[] {
+  const scoped = system !== undefined && system !== "" ? sql` AND b.system = ${system}` : sql``;
+  return [
+    desc(sql`EXISTS (SELECT 1 FROM ${variants} b WHERE b.version_id = ${versions.id} AND NOT b.broken${scoped})`),
+    desc(lastSeen(sql`${variants.id}`)),
+    desc(versions.sortKey),
+  ];
+}
+
 /** The column list every searcher selects, joined into a ResultPackage. */
 const resultColumns = {
   name: packages.name,
@@ -194,8 +246,9 @@ export async function searchByName(q: SearchQuery): Promise<ResultPackage[]> {
  * Mirrors sqlNameVersionSearch / sqlNameLatestSearch, including the "latest"
  * special case and its prerelease fallback (performed by the caller).
  *
- * Sanctioned change #3: at `latest`, prefer the newest non-broken version and
- * fall back to broken-only, mirroring the existing prerelease fallback.
+ * Sanctioned change #3: at `latest`, prefer a version with a non-broken
+ * variant and fall back to broken-only (see latestOrder), mirroring the
+ * existing prerelease fallback.
  */
 export async function searchByNameVersion(q: SearchQuery): Promise<ResultPackage[]> {
   const term = q.name!;
@@ -207,7 +260,7 @@ export async function searchByNameVersion(q: SearchQuery): Promise<ResultPackage
 
   let versionId: number | undefined;
   if (version === "latest") {
-    versionId = await pickLatestVersionId(scope, { preferNonBroken: true });
+    versionId = await pickLatestVersionId(scope, q.system);
   } else {
     versionId = await pickConstrainedVersionId(term, version, scope);
   }
@@ -220,28 +273,17 @@ export async function searchByNameVersion(q: SearchQuery): Promise<ResultPackage
   return rows as ResultPackage[];
 }
 
-/** The newest version id in scope, optionally preferring non-broken ones. */
-async function pickLatestVersionId(
-  scope: SQL[],
-  options: { preferNonBroken: boolean },
-): Promise<number | undefined> {
-  const pick = async (extra?: SQL): Promise<number | undefined> => {
-    const rows = await db()
-      .select({ id: versions.id })
-      .from(variants)
-      .innerJoin(versions, eq(versions.id, variants.versionId))
-      .innerJoin(packages, eq(packages.id, versions.packageId))
-      .where(extra === undefined ? and(...scope) : and(...scope, extra))
-      .orderBy(desc(versions.sortKey))
-      .limit(1);
-    return rows[0]?.id;
-  };
-
-  if (options.preferNonBroken) {
-    const nonBroken = await pick(eq(variants.broken, false));
-    if (nonBroken !== undefined) return nonBroken;
-  }
-  return pick();
+/** The `latest` version id in scope, by latestOrder. One round trip. */
+async function pickLatestVersionId(scope: SQL[], system: string | undefined): Promise<number | undefined> {
+  const rows = await db()
+    .select({ id: versions.id })
+    .from(variants)
+    .innerJoin(versions, eq(versions.id, variants.versionId))
+    .innerJoin(packages, eq(packages.id, versions.packageId))
+    .where(and(...scope))
+    .orderBy(...latestOrder(system))
+    .limit(1);
+  return rows[0]?.id;
 }
 
 /**
@@ -473,20 +515,18 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
     WITH ORDINALITY AS hits(package_id, ord)`;
 
   if (latestOnly) {
-    // Per package, the newest non-prerelease version, preferring one with a
-    // non-broken variant (sanctioned change #3) — the choice
-    // pickLatestVersionId makes, expressed as a single ordering.
+    // Per package, the non-prerelease version pickLatestVersionId would
+    // choose: the same ordering (latestOrder) over the package's variants.
     const rows = await db()
       .selectDistinctOn([sql`hits.ord`], resultColumns)
       .from(hits)
       .innerJoin(
         sql`LATERAL (
-          SELECT v.id AS version_id
-          FROM ${versions} v
-          WHERE v.package_id = hits.package_id AND v.prerelease = false
-          ORDER BY
-            EXISTS (SELECT 1 FROM ${variants} b WHERE b.version_id = v.id AND NOT b.broken) DESC,
-            v.sort_key DESC
+          SELECT ${versions.id} AS version_id
+          FROM ${variants}
+          JOIN ${versions} ON ${versions.id} = ${variants.versionId}
+          WHERE ${versions.packageId} = hits.package_id AND ${versions.prerelease} = false
+          ORDER BY ${sql.join(latestOrder(undefined), sql`, `)}
           LIMIT 1
         ) AS latest`,
         sql`true`,

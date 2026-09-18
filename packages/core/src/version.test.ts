@@ -132,6 +132,15 @@ describe("compareVersions", () => {
 
   test("real-world nixpkgs version shapes", () => {
     check("2024-01-05", "2024-1-6", -1); // date versions, mixed zero padding
+    // A date snapshot compares above any numeric release; this is by
+    // design (the order is a total order over strings, and mod_python's
+    // 2022-10-18 really is newer than its 3.5.0). Which one `latest` returns
+    // is decided from nixpkgs history in apps/web/lib/search.ts, not here
+    // (#44: go-font 2.010, age 1.3.2 and alejandra 4.0.0 are all "older"
+    // than their snapshots by this comparator).
+    check("2.010", "2017-03-30", -1);
+    check("1.3.2", "2020-03-25", -1);
+    check("4.0.0", "2022-02-12", -1);
     check("1.1.1w", "1.1.1v", 1); // openssl patch letters
     check("0.0.0+date=2023-01-13", "0.0.0+date=2023-01-14", -1);
     check("5.15.108", "6.1.25", -1);
