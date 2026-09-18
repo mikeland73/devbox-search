@@ -203,7 +203,9 @@ describe("sortKey", () => {
     const versionish = fc.stringMatching(/^v?[0-9]{1,3}(\.[0-9]{1,3}){0,3}[a-z]{0,5}[0-9]{0,2}$/);
     fc.assert(
       fc.property(versionish, versionish, versionish, (a, b, c) => {
-        expect(compareVersions(a, b)).toBe(-compareVersions(b, a));
+        // Written as a sum rather than `toBe(-cmp(b, a))`: when a == b both
+        // sides are 0, and `toBe` (Object.is) distinguishes -0 from +0.
+        expect(compareVersions(a, b) + compareVersions(b, a)).toBe(0);
         if (compareVersions(a, b) <= 0 && compareVersions(b, c) <= 0) {
           expect(compareVersions(a, c)).toBeLessThanOrEqual(0);
         }
