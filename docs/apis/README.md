@@ -65,6 +65,7 @@ critical path.
 | Method | Path | Summary | Handler |
 | --- | --- | --- | --- |
 | GET | [`/readyz`](#get-readyz) | Health check | `app/readyz/route.ts` |
+| GET | [`/status`](#get-status) | Index status | `app/status/route.ts` |
 | GET | [`/v2/resolve`](#get-v2resolve) | Resolve a package reference to a nixpkgs flake reference | `app/v2/resolve/route.ts` |
 | GET | [`/v2/search`](#get-v2search) | Search packages by name | `app/v2/search/route.ts` |
 | GET | [`/v2/pkg`](#get-v2pkg) | Every release of one package | `app/v2/pkg/route.ts` |
@@ -1959,7 +1960,7 @@ X-Content-Type-Options: nosniff
 
 ## ops
 
-Health check.
+Health check and index status. Not part of the Go service's API.
 
 ### GET /readyz
 
@@ -1995,7 +1996,71 @@ ok
 
 </details>
 
+### GET /status
+
+**Index status**
+
+Index-wide statistics: exact row counts, the span of the commit
+timeline, and when each Nix system was last imported — enough to tell
+at a glance whether the daily import is keeping up, and where a
+system frozen at an older commit shows up. Cached for five minutes
+(`Cache-Control: public, s-maxage=300, stale-while-revalidate=600`).
+
+Unlike the v1/v2 endpoints this shape is not Go-derived: timestamps
+are JavaScript `Date` serializations (RFC 3339 with milliseconds,
+`2026-09-17T19:30:00.123Z`) and nothing is **omitempty**. No example
+is captured here because every field is live data.
+
+Methods: `GET`, `HEAD`, `OPTIONS`
+
+#### Responses
+
+| Status | Content-Type | Body | Description |
+| --- | --- | --- | --- |
+| 200 | `application/json` | [Status](#status) | The current index state. |
+| 500 | `text/plain; charset=utf-8` | string | The database query failed. `500 Internal Server Error`, optionally followed by `: <context>`. |
+
 ## Schemas
+
+### Status
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `counts` | object | yes | Exact `count(*)` of each table. |
+| `counts.packages` | integer | yes |  |
+| `counts.versions` | integer | yes |  |
+| `counts.variants` | integer | yes |  |
+| `counts.variant_ranges` | integer | yes |  |
+| `counts.meta` | integer | yes |  |
+| `counts.search_terms` | integer | yes |  |
+| `counts.commits` | integer | yes |  |
+| `oldest_commit` | [CommitRef](#commitref) or null | yes | The first commit on the timeline; `null` when nothing has been imported. |
+| `newest_commit` | [CommitRef](#commitref) or null | yes | The newest commit on the timeline (on any system); `null` when nothing has been imported. |
+| `last_import_at` | string (RFC 3339) or null | yes | When the most recent evaluation, on any system, was imported; `null` when nothing has been imported. |
+| `systems` | array of [SystemStatus](#systemstatus) | yes | Per-system import state, sorted by system name. |
+| `database_size_bytes` | integer | yes | `pg_database_size()` of the serving database. |
+| `generated_at` | string (RFC 3339) | yes | When these numbers were computed (responses are CDN-cached). |
+
+### CommitRef
+
+One point on the nixpkgs commit timeline.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `seq` | integer | yes | Dense position on the timeline, 1 for the oldest commit. |
+| `hash` | string | yes | The nixpkgs commit hash. |
+| `committed_at` | string (RFC 3339) | yes | The nixpkgs commit date. |
+| `imported_at` | string (RFC 3339) | yes | When the commit row was created in this index. |
+
+### SystemStatus
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `system` | string | yes | Nix system, e.g. `x86_64-linux`. |
+| `commits` | integer | yes | Commits with an imported evaluation for this system. |
+| `newest` | [CommitRef](#commitref) | yes | The newest commit evaluated for this system. Lower than `newest_commit` for a system no longer indexed. |
+| `last_imported_at` | string (RFC 3339) | yes | When that newest evaluation was imported. |
+| `nix_version` | string or null | yes | `nix --version` behind the newest evaluation; `null` for rows created by the migration seed. |
 
 ### V2Resolve
 

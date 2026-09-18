@@ -1,0 +1,37 @@
+# Lint, typecheck and unit tests for every PR and push to main.
+#
+# The integration workflow only exercises deployments; nothing else ran the
+# unit suite, so a red test (or a route missing from docs/apis/openapi.yaml,
+# which apiDocs.test.ts checks) could sit on main unnoticed (#51). The
+# PGlite-backed query tests run in-process and need no database.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The web tests import the workspace packages' build output.
+      - run: pnpm --filter "./packages/*" build
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
