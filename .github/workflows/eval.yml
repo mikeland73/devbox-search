@@ -169,7 +169,7 @@ jobs:
           mv eval.json.gz "$dir/"
           echo "${{ steps.nix.outputs.version }}" > "$dir/nix-version"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: eval-${{ matrix.system }}-${{ inputs.commit }}
           path: eval-${{ matrix.system }}-${{ inputs.commit }}
