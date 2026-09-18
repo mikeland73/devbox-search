@@ -34,7 +34,9 @@ export const README_PATH = join(DOCS_DIR, "README.md");
 // ---------------------------------------------------------------------------
 
 export interface Schema {
-  type?: string;
+  /** A type name, or (OpenAPI 3.1) a list of them, e.g. `[string, "null"]`. */
+  type?: string | string[];
+  oneOf?: Schema[];
   description?: string;
   required?: string[];
   properties?: Record<string, Schema>;
@@ -460,6 +462,8 @@ function typeOf(schema: Schema): string {
   }
   if (schema.const !== undefined) return `\`${JSON.stringify(schema.const)}\``;
   if (schema.enum !== undefined) return schema.enum.map((v) => `\`${String(v)}\``).join(" \\| ");
+  if (schema.oneOf !== undefined) return schema.oneOf.map(typeOf).join(" or ");
+  if (Array.isArray(schema.type)) return schema.type.map((type) => typeOf({ ...schema, type })).join(" or ");
   switch (schema.type) {
     case "array":
       return `array of ${typeOf(schema.items ?? {})}`;
