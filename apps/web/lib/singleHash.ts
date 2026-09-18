@@ -8,10 +8,19 @@
  * EVERY requested system and emit that single rev everywhere. That is the
  * direct expression of the maximize-packages-per-hash goal.
  *
- * Fallback: seeded rows are point ranges (the compact DB has no history), so
- * when the intersection is empty we return the per-system commits unchanged —
- * which is exactly the old behavior. Post-migration data has real intervals,
- * so coverage improves over time.
+ * Only live ranges count. Seeded rows are point ranges at a row's last
+ * content change (the compact DB has no history), which says nothing about
+ * presence, and a system that was never imported after the seed
+ * (x86_64-darwin, frozen at the migration) would otherwise pin every other
+ * system's rev to a commit from before the migration. So a system with no
+ * live range keeps its own commit, and the unified rev is chosen among the
+ * rest; when fewer than two systems remain, nothing changes — the old
+ * per-system behavior.
+ *
+ * An open range means "present in every import of this system since
+ * first_seq", so its upper bound is that system's newest imported commit
+ * (commit_systems), not the newest commit overall: a system that lags behind
+ * cannot claim presence at a commit it has never evaluated (#50).
  */
 
 import { sql } from "drizzle-orm";
@@ -22,7 +31,12 @@ interface RangeRow {
   attr_path: string;
   first_seq: number;
   last_seq: number | null;
-  seeded: boolean;
+  /**
+   * The newest commit imported for this system: the bound of an open range.
+   * Null only if the system has never been imported, which a live range
+   * rules out; treated as "no interval" rather than trusted.
+   */
+  head_seq: number | null;
 }
 
 /**
@@ -45,34 +59,39 @@ export async function singleHashAcrossSystems(pkgs: ResultPackage[]): Promise<Re
   let ranges: RangeRow[];
   try {
     const result = await db().execute(sql`
-      SELECT v.system, v.attr_path, r.first_seq, r.last_seq, r.seeded
+      SELECT v.system, v.attr_path, r.first_seq, r.last_seq,
+        (SELECT max(cs.commit_seq) FROM commit_systems cs WHERE cs.system = v.system) AS head_seq
       FROM variants v
       JOIN variant_ranges r ON r.variant_id = v.id
       JOIN versions ver ON ver.id = v.version_id
       JOIN packages p ON p.id = ver.package_id
-      WHERE lower(p.name) = lower(${name}) AND ver.version = ${version}
+      WHERE lower(p.name) = lower(${name}) AND ver.version = ${version} AND NOT r.seeded
     `);
     ranges = rowsOf<RangeRow>(result);
   } catch {
     // Never fail a resolve because the optimization couldn't run.
     return pkgs;
   }
-  if (ranges.length === 0) return pkgs;
 
-  // For each system, the set of commit seqs covering it, as intervals.
-  const wanted = [...bySystem.keys()];
+  // For each emitted system, the commit seqs at which the attribute path the
+  // response names carried this version, as intervals. Only that attribute
+  // path counts: the rev is emitted next to it, so it must exist there.
   const perSystem = new Map<string, Array<{ lo: number; hi: number }>>();
   for (const row of ranges) {
-    if (!bySystem.has(row.system)) continue;
+    if (bySystem.get(row.system)?.attrPath !== row.attr_path) continue;
+    const hi = row.last_seq ?? row.head_seq;
+    if (hi === null) continue;
     const list = perSystem.get(row.system) ?? [];
-    list.push({ lo: row.first_seq, hi: row.last_seq ?? Number.MAX_SAFE_INTEGER });
+    list.push({ lo: row.first_seq, hi });
     perSystem.set(row.system, list);
   }
-  if (wanted.some((s) => (perSystem.get(s) ?? []).length === 0)) return pkgs;
+  const unified = [...perSystem.keys()];
+  if (unified.length < 2) return pkgs;
 
-  // The newest seq present on every system: walk each system's intervals and
-  // intersect. The interval count per variant is 1-3, so this stays tiny.
-  const best = newestCommonSeq(wanted.map((s) => perSystem.get(s)!));
+  // The newest seq present on every unified system: walk each system's
+  // intervals and intersect. The interval count per variant is 1-3, so this
+  // stays tiny.
+  const best = newestCommonSeq(unified.map((s) => perSystem.get(s)!));
   if (best === null) return pkgs;
 
   // Resolve the seq back to a hash and date.
@@ -88,13 +107,15 @@ export async function singleHashAcrossSystems(pkgs: ResultPackage[]): Promise<Re
   if (commit === undefined) return pkgs;
 
   const lastUpdated = commit.committed_at instanceof Date ? commit.committed_at : new Date(commit.committed_at);
-  return pkgs.map((pkg) => ({ ...pkg, commitHash: commit.hash, lastUpdated }));
+  return pkgs.map((pkg) =>
+    perSystem.has(pkg.system) ? { ...pkg, commitHash: commit.hash, lastUpdated } : pkg,
+  );
 }
 
 /**
  * The largest integer contained in at least one interval of every group, or
- * null when the intersection is empty (which is the seeded point-range case
- * whenever the per-system commits differ).
+ * null when the intersection is empty (the version was never present on all
+ * of them at the same commit).
  */
 export function newestCommonSeq(groups: Array<Array<{ lo: number; hi: number }>>): number | null {
   if (groups.length === 0) return null;

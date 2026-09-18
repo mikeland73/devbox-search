@@ -250,8 +250,12 @@ export const variants = pgTable(
  * intersecting across constraints.
  *
  * `seeded` marks rows created by the one-time sqlite seed, which are point
- * ranges (firstSeq = lastSeq) because the compact DB carries no history.
- * Resolution falls back to per-system commits for seeded data.
+ * ranges (firstSeq = lastSeq) at the row's last content change, because the
+ * compact DB carries no history. They say nothing about presence, so the
+ * query layer ignores them wherever presence matters (single-hash
+ * resolution, `latest`); a system with only seeded ranges keeps its
+ * per-system commit, as does every system when fewer than two have live
+ * ranges to unify.
  */
 export const variantRanges = pgTable(
   "variant_ranges",

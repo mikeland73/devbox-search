@@ -330,6 +330,21 @@ test("GET /v2/resolve?name=go&version=latest", async () => {
     assert.match(info.flake_installable.ref.rev, SHA);
     assert.match(info.flake_installable.attr_path, /^go(_\d+_\d+)?$/);
   }
+
+  // Sanctioned change #2, for a version still in nixpkgs: the one rev is the
+  // newest commit every indexed system has evaluated (#50). /status names
+  // it; the two are cached separately, so allow the head to have moved on
+  // by one import between the calls.
+  const status = okJson(await get("/status"), "/status");
+  const heads = INDEXED_SYSTEMS.map((s) => status.systems.find((x) => x.system === s).newest);
+  const common = heads.reduce((a, b) => (a.seq <= b.seq ? a : b));
+  const revs = new Set(INDEXED_SYSTEMS.map((s) => body.systems[s].flake_installable.ref.rev));
+  assert.equal(revs.size, 1, `expected a single rev across ${INDEXED_SYSTEMS}, got ${[...revs]}`);
+  const [rev] = revs;
+  assert.ok(
+    rev === common.hash || rev === status.newest_commit.hash,
+    `go@latest rev ${rev} is not the current head (${heads.map((h) => `${h.seq}=${h.hash.slice(0, 8)}`)})`,
+  );
 });
 
 test("latest is the current release, not a date snapshot the attribute moved on from (#44)", async () => {
