@@ -9,7 +9,8 @@
  *
  *   1. rate-limit-override  header X-Rate-Limit-Override-Secret == $SECRET
  *                           → bypass (skips every later custom rule)
- *   2. rate-limit-per-ip    path != /readyz
+ *   2. rate-limit-per-ip    path not /readyz (or /readyz/, which the app
+ *                           serves as the same route, #45)
  *                           → 1000 requests per 600 s per client IP, 429 over
  *
  * Order matters: bypass only skips rules *after* it. Rules are matched by
@@ -24,7 +25,10 @@
  *
  * Needs a logged-in Vercel CLI (v59+) with access to the project. The
  * secret ends up in the firewall configuration, readable by anyone with
- * access to the project; treat it like an environment variable.
+ * access to the project; treat it like an environment variable. It is
+ * also passed to the CLI as an argument (the CLI takes conditions from
+ * argv only, no stdin or env form), so it is briefly visible in the
+ * process list of the machine running this.
  */
 
 import { spawnSync } from "node:child_process";
@@ -53,7 +57,7 @@ const RULES = [
   {
     name: "rate-limit-per-ip",
     description: `${RATE_LIMIT.limit} requests per ${RATE_LIMIT.window / 60} minutes per client IP, all paths except /readyz`,
-    condition: { type: "path", op: "neq", value: "/readyz" },
+    condition: { type: "path", op: "re", value: "^/readyz/?$", neg: true },
     action: "rate_limit",
     rateLimit: RATE_LIMIT,
     flags: [
@@ -77,6 +81,11 @@ function vercel(...args) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
+  if (res.error !== undefined) {
+    // The binary itself could not be run; stdout/stderr are null then.
+    console.error(`could not run vercel (is the Vercel CLI installed and on PATH?): ${res.error.message}`);
+    process.exit(1);
+  }
   process.stderr.write(res.stderr.replaceAll(secret, "<secret>"));
   if (res.status !== 0) {
     process.stderr.write(res.stdout.replaceAll(secret, "<secret>"));

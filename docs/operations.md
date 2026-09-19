@@ -185,7 +185,8 @@ app has no limiter; the old Go service had one in-process, see
 
 1. **`rate-limit-override`** — request header `X-Rate-Limit-Override-Secret`
    equals the shared secret → *bypass*, which skips every later custom rule.
-2. **`rate-limit-per-ip`** — path is not `/readyz` → *rate limit*: 1000
+2. **`rate-limit-per-ip`** — path is not `/readyz` (nor `/readyz/`, the
+   same route to the app) → *rate limit*: 1000
    requests per 600 s per client IP (fixed window; token bucket is an
    Enterprise feature), 429 over the limit until the window resets.
 
