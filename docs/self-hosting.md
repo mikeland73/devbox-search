@@ -110,7 +110,10 @@ On Vercel: import the fork, set **Root Directory** to `apps/web`
 (`apps/web/vercel.json` carries the install and build commands), add
 `DATABASE_URL`. Turn Deployment Protection off if you want preview URLs
 usable from a `devbox` CLI (it cannot send a bypass header), and leave Git
-Fork Protection on.
+Fork Protection on. Rate limiting is not in the app: the public deployment
+gets it from the Vercel WAF, and `tools/firewall.mjs` recreates those rules
+on any Vercel project (see "Rate limiting" in `docs/operations.md`).
+Elsewhere, put your own limiter in front.
 
 Anywhere else:
 

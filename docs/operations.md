@@ -175,3 +175,65 @@ BASE_URL=https://devbox-search.vercel.app node --test tools/integration.test.mjs
 Deployment Protection is off on the Vercel project: previews must be publicly
 reachable because a real `devbox` CLI pointed at one cannot send a bypass
 header. Git Fork Protection is on, so pull requests from forks do not deploy.
+
+## Rate limiting
+
+The API is rate-limited by the Vercel WAF, not by the route handlers (the
+app has no limiter; the old Go service had one in-process, see
+`internal/api/limiter.go` there). Two custom firewall rules on the
+`devbox-search` project, evaluated in this order:
+
+1. **`rate-limit-override`** — request header `X-Rate-Limit-Override-Secret`
+   equals the shared secret → *bypass*, which skips every later custom rule.
+2. **`rate-limit-per-ip`** — path is not `/readyz` (nor `/readyz/`, the
+   same route to the app) → *rate limit*: 1000
+   requests per 600 s per client IP (fixed window; token bucket is an
+   Enterprise feature), 429 over the limit until the window resets.
+
+Things to know:
+
+- The WAF sits in front of the CDN cache, so **cache hits count** — unlike
+  the Go limiter, which only saw requests that reached the process. A
+  `devbox` run that fans out many `/v2/resolve` calls is counted in full.
+  1000/10 min is generous for that reason.
+- Counters are per Vercel region; a client whose requests land in several
+  regions gets a little more than the limit.
+- The 429 is Vercel's, not the plain-text error form the handlers use.
+  Shipped `devbox` CLIs only check the status code.
+- The bypass skips *our* rules only. Vercel's system-level DDoS mitigation
+  still applies to every request, header or not — a fast burst from one IP
+  (a couple of hundred requests in a few seconds, in testing) gets that IP
+  a `403` with `x-vercel-mitigated: challenge` for a while, and no
+  application-level secret clears it. If a trusted client needs to burst,
+  add its IP with `vercel firewall system-bypass add <ip>`.
+- Rate-limited traffic is free; allowed requests evaluated by the rule are
+  billed at $0.50 per million after the plan's included usage.
+
+The rules are reproduced by `tools/firewall.mjs` (`vercel.json` can only
+express deny/challenge rules, so this goes through the CLI):
+
+```sh
+RATE_LIMIT_OVERRIDE_SECRET=<secret> node tools/firewall.mjs   # stages edits, prints the diff
+vercel firewall publish --project devbox-search                # makes them live
+```
+
+Re-running is safe: rules are matched by name and left alone when already
+up to date. Changing the numbers means editing the constants there, running
+it, and publishing.
+
+The secret lives in the firewall rule (visible to anyone with project access
+— `vercel firewall rules list --expand`) and, so CI can never be the client
+that trips the limit, in the `RATE_LIMIT_OVERRIDE_SECRET` repository secret
+that `integration.yml` passes to `tools/integration.test.mjs`. To rotate:
+`openssl rand -hex 32`, run the script and publish, then
+`gh secret set RATE_LIMIT_OVERRIDE_SECRET`. Any other trusted client sends it
+as a request header:
+
+```sh
+curl -H "X-Rate-Limit-Override-Secret: $SECRET" https://devbox-search.vercel.app/v2/resolve?name=go&version=latest
+```
+
+Inspect what the rules are doing with `vercel firewall overview` (or the
+Firewall tab of the project) and `vercel firewall rules inspect
+rate-limit-per-ip`.
+

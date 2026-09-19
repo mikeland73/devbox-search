@@ -34,6 +34,9 @@ jobs:
       # on older payloads.
       BASE_URL: ${{ github.event.deployment_status.environment_url || github.event.deployment_status.target_url }}
       ENVIRONMENT: ${{ github.event.deployment.environment }}
+      # Skips the WAF's per-IP rate limit (docs/operations.md). Unset on
+      # forks, where the test just counts against the limit like any client.
+      RATE_LIMIT_OVERRIDE_SECRET: ${{ secrets.RATE_LIMIT_OVERRIDE_SECRET }}
     steps:
       - uses: actions/checkout@v7
         with:

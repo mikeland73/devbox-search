@@ -33,6 +33,17 @@ if (BASE_URL === "") {
   process.exit(2);
 }
 
+/**
+ * The Vercel WAF limits each client IP to 1000 requests per 10 minutes (see
+ * docs/operations.md). One run is well under that, but runs share the
+ * runner IP pool, so CI sends the override secret and skips the limit
+ * entirely. Optional: without it the test still passes, just counted.
+ */
+const HEADERS = { "User-Agent": "devbox-search-integration" };
+if (process.env.RATE_LIMIT_OVERRIDE_SECRET) {
+  HEADERS["X-Rate-Limit-Override-Secret"] = process.env.RATE_LIMIT_OVERRIDE_SECRET;
+}
+
 const SHA = /^[0-9a-f]{40}$/;
 /** v2 timestamps: RFC 3339 without fractional seconds. */
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
@@ -58,7 +69,7 @@ const INDEXED_SYSTEMS = ["aarch64-darwin", "aarch64-linux", "x86_64-linux"];
 async function get(path) {
   const res = await fetch(BASE_URL + path, {
     signal: AbortSignal.timeout(60_000),
-    headers: { "User-Agent": "devbox-search-integration" },
+    headers: HEADERS,
     // The Go service never redirected, so a 3xx is a finding, not a hop to
     // follow: `/pkg/` → 308 → `/pkg` → 400 would otherwise pass as a 400.
     redirect: "manual",
