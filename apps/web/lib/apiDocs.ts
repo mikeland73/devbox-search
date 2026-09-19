@@ -493,9 +493,13 @@ function anchor(heading: string): string {
     .replace(/\s+/g, "-");
 }
 
-/** Collapses a description to one table cell. */
+/** Collapses a description to one table cell. Backslashes go first so an escaped pipe stays escaped. */
 function oneLine(text: string): string {
-  return text.trim().replace(/\s*\n\s*/g, " ").replace(/\|/g, "\\|");
+  return text
+    .trim()
+    .replace(/\s*\n\s*/g, " ")
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|");
 }
 
 function escapeHtml(s: string): string {
