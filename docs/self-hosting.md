@@ -123,7 +123,7 @@ cd apps/web && DATABASE_URL=<url> pnpm exec next start
 ```
 
 Check it: `/readyz` → `ok`, `/v2/resolve?name=hello&version=latest`,
-`/status` for the index head and per-system state. Then run the integration
+`/status` (or `/status.json`) for the index head and per-system state. Then run the integration
 suite against it:
 
 ```sh

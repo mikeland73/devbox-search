@@ -20,7 +20,7 @@
  *     same commits for as long as this service exists. Those are pinned
  *     exactly; a change there is a query-layer regression, not data drift.
  *   - Moving. `python@3.11` gets patch releases, `go@latest` moves every
- *     release, /status grows daily. Those are checked for shape and
+ *     release, /status.json grows daily. Those are checked for shape and
  *     invariants only.
  */
 
@@ -47,7 +47,7 @@ if (process.env.RATE_LIMIT_OVERRIDE_SECRET) {
 const SHA = /^[0-9a-f]{40}$/;
 /** v2 timestamps: RFC 3339 without fractional seconds. */
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/;
-/** Timestamps rendered by JSON.stringify(Date) — /status is not Go-shaped. */
+/** Timestamps rendered by JSON.stringify(Date) — /status.json is not Go-shaped. */
 const ISO_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 // go 1.22: its last nixpkgs release (1.22.12) and the newest commit carrying
@@ -132,8 +132,8 @@ test("GET /readyz", async () => {
   assert.match(res.contentType, /^text\/plain/);
 });
 
-test("GET /status reports a fully indexed database", async () => {
-  const path = "/status";
+test("GET /status.json reports a fully indexed database", async () => {
+  const path = "/status.json";
   const body = okJson(await get(path), path);
 
   // Row counts as of 2026-09-17 (seq 2795); the index only grows.
@@ -167,6 +167,28 @@ test("GET /status reports a fully indexed database", async () => {
     [...body.systems.map((s) => s.system)].sort(),
     "systems are sorted by name",
   );
+
+  // The common toolchains all resolve, on every indexed system.
+  const latest = Object.fromEntries(body.latest_versions.map((l) => [l.name, l]));
+  for (const name of ["python", "nodejs", "go", "rustc"]) {
+    assert.ok(latest[name], `latest_versions lacks ${name}`);
+    assert.match(latest[name].version, /^\d+\.\d+/, `${name}@latest: ${latest[name].version}`);
+    for (const system of INDEXED_SYSTEMS) {
+      assert.ok(latest[name].systems.includes(system), `${name}@latest is missing ${system}`);
+    }
+    assert.match(latest[name].last_updated, ISO_MS);
+  }
+});
+
+test("GET /status is the same numbers as a page", async () => {
+  const res = await get("/status");
+  assert.equal(res.status, 200);
+  assert.match(res.contentType, /^text\/html/);
+  const status = okJson(await get("/status.json"), "/status.json");
+  assert.ok(res.text.includes(status.newest_commit.hash.slice(0, 12)), "page names the newest commit");
+  for (const l of status.latest_versions) {
+    if (l.version !== null) assert.ok(res.text.includes(l.version), `page shows ${l.name} ${l.version}`);
+  }
 });
 
 // Go path.Clean'd every request path, so a trailing slash reached the same
@@ -343,10 +365,10 @@ test("GET /v2/resolve?name=go&version=latest", async () => {
   }
 
   // Sanctioned change #2, for a version still in nixpkgs: the one rev is the
-  // newest commit every indexed system has evaluated (#50). /status names
+  // newest commit every indexed system has evaluated (#50). /status.json names
   // it; the two are cached separately, so allow the head to have moved on
   // by one import between the calls.
-  const status = okJson(await get("/status"), "/status");
+  const status = okJson(await get("/status.json"), "/status.json");
   const heads = INDEXED_SYSTEMS.map((s) => status.systems.find((x) => x.system === s).newest);
   const common = heads.reduce((a, b) => (a.seq <= b.seq ? a : b));
   const revs = new Set(INDEXED_SYSTEMS.map((s) => body.systems[s].flake_installable.ref.rev));
@@ -401,7 +423,7 @@ test("python@latest is the interpreter nixpkgs-unstable ships, not a stale line 
   const path = "/v2/resolve?name=python&version=latest";
   const body = okJson(await get(path), path);
   assert.match(body.version, /^3\.(1[4-9]|[2-9]\d)\.\d+$/, `python@latest: ${body.version}`);
-  const status = okJson(await get("/status"), "/status");
+  const status = okJson(await get("/status.json"), "/status.json");
   for (const system of INDEXED_SYSTEMS) {
     const info = body.systems[system];
     assert.ok(info, `missing system ${system}`);

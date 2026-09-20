@@ -1,6 +1,8 @@
 /**
- * Index-wide statistics for GET /status: how much data there is, how far the
- * commit timeline reaches, and when each system was last imported.
+ * Index-wide statistics for GET /status.json (and the /status page): how much
+ * data there is, how far the commit timeline reaches, when each system was
+ * last imported, and what `latest` currently resolves to for a handful of
+ * everyday packages.
  *
  * Everything here is derived from the schema's own bookkeeping (`commits`,
  * `commit_systems`) plus row counts, so it is cheap to keep honest. The row
@@ -20,7 +22,53 @@ import {
   variants,
   versions,
 } from "@devbox-search/db";
-import { db, rowsOf } from "./search";
+import { db, latestOrder, nameOrAttrPath, rowsOf } from "./search";
+
+/**
+ * Packages whose `latest` resolution the status page shows: the toolchains
+ * a devbox.json most often pins, in the names devbox users write. A glance
+ * at these says whether the index is tracking upstream releases, which the
+ * row counts alone cannot.
+ */
+export const COMMON_PACKAGES = [
+  "python",
+  "nodejs",
+  "go",
+  "rustc",
+  "ruby",
+  "php",
+  "jdk",
+  "deno",
+  "bun",
+  "elixir",
+  "erlang",
+  "dotnet-sdk",
+  "zig",
+  "gcc",
+  "clang",
+  "ghc",
+  "kotlin",
+  "swift",
+  "perl",
+  "lua",
+  "julia",
+  "terraform",
+  "kubectl",
+  "postgresql",
+  "redis",
+  "sqlite",
+  "git",
+  "docker",
+  "uv",
+  "pnpm",
+] as const;
+
+/**
+ * Cache policy for /status.json and /status: fresh enough to catch a stalled
+ * import within minutes, cached enough that the ~4M-row counts aren't
+ * recomputed per request.
+ */
+export const STATUS_CACHE_CONTROL = "public, s-maxage=300, stale-while-revalidate=600";
 
 /** One point on the commit timeline. */
 export interface CommitRef {
@@ -45,6 +93,19 @@ export interface SystemStatus {
   nix_version: string | null;
 }
 
+/** What `name@latest` resolves to right now. */
+export interface LatestVersion {
+  name: string;
+  /** null when the name does not resolve at all. */
+  version: string | null;
+  /** The (alphabetically first) attribute path serving that version. */
+  attr_path: string | null;
+  /** Systems the version is available on, sorted. */
+  systems: string[];
+  /** The newest nixpkgs commit date among those variants. */
+  last_updated: Date | null;
+}
+
 export interface Status {
   /** Exact row counts per table. */
   counts: {
@@ -65,17 +126,20 @@ export interface Status {
   systems: SystemStatus[];
   /** pg_database_size() of the serving database. */
   database_size_bytes: number;
+  /** `latest` for each of {@link COMMON_PACKAGES}, in that order. */
+  latest_versions: LatestVersion[];
   /** When these numbers were computed (responses are CDN-cached). */
   generated_at: Date;
 }
 
 export async function status(): Promise<Status> {
-  const [counts, oldest, newest, systems, sizeRows] = await Promise.all([
+  const [counts, oldest, newest, systems, sizeRows, latest] = await Promise.all([
     countRows(),
     commitAt("oldest"),
     commitAt("newest"),
     systemStatuses(),
     db().execute(sql`SELECT pg_database_size(current_database())::text AS bytes`),
+    latestVersions([...COMMON_PACKAGES]),
   ]);
 
   let lastImportAt: Date | null = null;
@@ -90,6 +154,7 @@ export async function status(): Promise<Status> {
     last_import_at: lastImportAt,
     systems,
     database_size_bytes: Number(rowsOf<{ bytes: string }>(sizeRows)[0]!.bytes),
+    latest_versions: latest,
     generated_at: new Date(),
   };
 }
@@ -161,4 +226,57 @@ async function systemStatuses(): Promise<SystemStatus[]> {
     last_imported_at: r.last_imported_at,
     nix_version: r.nix_version,
   }));
+}
+
+/**
+ * What `name@latest` resolves to, for each name, in one round trip.
+ *
+ * The same choice /v2/resolve makes — nameOrAttrPath scoping and latestOrder,
+ * per package via a LATERAL subquery — with resolve()'s "retry including
+ * prereleases" fallback folded into the ordering: a non-prerelease version
+ * outranks any prerelease, so the fallback only ever applies when there is
+ * nothing else. Names that match nothing are returned with null fields so
+ * the list is always the full input, in input order.
+ */
+export async function latestVersions(names: string[]): Promise<LatestVersion[]> {
+  if (names.length === 0) return [];
+  // Names carry no commas (they are package names), so a CSV parameter
+  // unnests cleanly; the ordinality keeps the input order.
+  const want = sql`unnest(string_to_array(${names.join(",")}, ',')) WITH ORDINALITY AS want(name, ord)`;
+  const rows = await db()
+    .select({
+      name: sql<string>`want.name`,
+      version: versions.version,
+      attr_path: sql<string>`min(${variants.attrPath})`,
+      // jsonb rather than text[]: both drivers parse jsonb, and drizzle only
+      // decodes array literals for schema columns.
+      systems: sql`jsonb_agg(DISTINCT ${variants.system})`.mapWith((v: unknown) =>
+        (typeof v === "string" ? (JSON.parse(v) as string[]) : (v as string[])).sort(),
+      ),
+      last_updated: max(commits.committedAt),
+    })
+    .from(want)
+    .innerJoin(
+      sql`LATERAL (
+        SELECT ${versions.id} AS version_id
+        FROM ${variants}
+        JOIN ${versions} ON ${versions.id} = ${variants.versionId}
+        WHERE ${nameOrAttrPath(sql`want.name`)}
+        ORDER BY ${versions.prerelease}, ${sql.join(latestOrder(undefined), sql`, `)}
+        LIMIT 1
+      ) AS latest`,
+      sql`true`,
+    )
+    .innerJoin(variants, sql`${variants.versionId} = latest.version_id`)
+    .innerJoin(versions, eq(versions.id, variants.versionId))
+    .innerJoin(commits, eq(commits.seq, variants.commitSeq))
+    .groupBy(sql`want.ord`, sql`want.name`, versions.version)
+    .orderBy(sql`want.ord`);
+
+  const found = new Map(rows.map((r) => [r.name, r]));
+  return names.map((name) => {
+    const r = found.get(name);
+    if (r === undefined) return { name, version: null, attr_path: null, systems: [], last_updated: null };
+    return { name, version: r.version, attr_path: r.attr_path, systems: r.systems, last_updated: r.last_updated };
+  });
 }

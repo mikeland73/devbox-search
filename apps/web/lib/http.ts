@@ -40,6 +40,19 @@ export function json(body: unknown, init: { status?: number; cacheControl?: stri
   });
 }
 
+/** An HTML page with the same caching headers and weak ETag as {@link json}. */
+export function html(body: string, init: { cacheControl?: string } = {}): Response {
+  const etag = `"${createHash("sha256").update(body).digest("base64url").slice(0, 27)}"`;
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": init.cacheControl ?? CACHE_CONTROL,
+      ETag: etag,
+    },
+  });
+}
+
 /** A plain-text error body identical to Go's http.Error output. */
 export function httpError(message: string, status: number): Response {
   return new Response(message + "\n", {

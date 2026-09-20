@@ -165,7 +165,7 @@ back to `SYSTEMS`; `eval.yml` rejects them up front.
 
 Every Vercel deployment — the preview of each PR and the production deploy of
 `main` — is exercised end to end by `.github/workflows/integration.yml`
-(searches, resolves, `/status`, error bodies) as soon as Vercel reports it
+(searches, resolves, `/status.json`, error bodies) as soon as Vercel reports it
 ready. The same script runs against any URL:
 
 ```sh

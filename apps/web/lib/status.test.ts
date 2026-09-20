@@ -1,12 +1,14 @@
 /**
- * /status against an in-process Postgres: the numbers must reflect the
- * seeded fixtures, the commit endpoints must be the first and last seq, and
- * the per-system view must surface a system frozen at an older commit.
+ * /status.json against an in-process Postgres: the numbers must reflect the
+ * seeded fixtures, the commit endpoints must be the first and last seq, the
+ * per-system view must surface a system frozen at an older commit, and the
+ * `latest` lookup must agree with what /v2/resolve would say.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { commitSystems } from "@devbox-search/db";
-import { status } from "./status";
+import { resolve } from "./search";
+import { COMMON_PACKAGES, latestVersions, status } from "./status";
 import { createTestDb, seedCommits, seedPackage, type TestDb } from "./testDb";
 
 let t: TestDb;
@@ -36,6 +38,9 @@ describe("status", () => {
     expect(s.last_import_at).toBeNull();
     expect(s.systems).toEqual([]);
     expect(s.database_size_bytes).toBeGreaterThan(0);
+    // Every common package is listed, none resolves.
+    expect(s.latest_versions.map((l) => l.name)).toEqual([...COMMON_PACKAGES]);
+    expect(new Set(s.latest_versions.map((l) => l.version))).toEqual(new Set([null]));
     expect(s.generated_at).toBeInstanceOf(Date);
   });
 
@@ -88,6 +93,71 @@ describe("status", () => {
     expect(darwin!.last_imported_at).toEqual(new Date("2026-09-02T00:00:00Z"));
 
     expect(s.last_import_at).toEqual(new Date("2026-09-03T00:00:00Z"));
+
+    // Of the fixture packages only go is in COMMON_PACKAGES (devbox users
+    // write `python`, not `python3`), so it is the one that resolves.
+    const go = s.latest_versions.find((l) => l.name === "go");
+    expect(go).toEqual({
+      name: "go",
+      version: "1.22.0",
+      attr_path: "go",
+      systems: ["x86_64-linux"],
+      last_updated: new Date(Date.UTC(2026, 0, 1)),
+    });
+    expect(s.latest_versions.find((l) => l.name === "python")).toMatchObject({ version: null, systems: [] });
+  });
+
+  test("latest versions agree with resolve() and keep input order", async () => {
+    await seedCommits(t.db, 3);
+    // go: 1.23.0 was dropped from nixpkgs at seq 2, so 1.22.0 is latest
+    // despite the lower version (latestOrder's presence rule).
+    await seedPackage(t.db, {
+      name: "go",
+      versions: [
+        { version: "1.22.0", systems: ["x86_64-linux", "aarch64-darwin"], commitSeq: 3 },
+        { version: "1.23.0", systems: ["x86_64-linux"], commitSeq: 1, lastSeq: 2 },
+      ],
+    });
+    // nodejs: served by attribute path only (the name devbox users write is
+    // the attr path here), and only as a prerelease.
+    await seedPackage(t.db, {
+      name: "nodejs-slim",
+      versions: [{ version: "27.0.0-rc.1", attrPath: "nodejs", systems: ["x86_64-linux"] }],
+    });
+    // python: a broken newest version loses to a working older one.
+    await seedPackage(t.db, {
+      name: "python",
+      versions: [
+        { version: "3.14.0", attrPath: "python314", broken: true },
+        { version: "3.13.2", attrPath: "python313" },
+      ],
+    });
+
+    const latest = await latestVersions(["python", "nope", "go", "nodejs"]);
+    expect(latest.map((l) => l.name)).toEqual(["python", "nope", "go", "nodejs"]);
+    expect(latest[0]).toEqual({
+      name: "python",
+      version: "3.13.2",
+      attr_path: "python313",
+      systems: ["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux"],
+      last_updated: new Date(Date.UTC(2026, 0, 1)),
+    });
+    expect(latest[1]).toEqual({ name: "nope", version: null, attr_path: null, systems: [], last_updated: null });
+    expect(latest[2]).toMatchObject({
+      version: "1.22.0",
+      attr_path: "go",
+      systems: ["aarch64-darwin", "x86_64-linux"],
+      last_updated: new Date(Date.UTC(2026, 0, 3)),
+    });
+    expect(latest[3]).toMatchObject({ version: "27.0.0-rc.1", attr_path: "nodejs", systems: ["x86_64-linux"] });
+
+    // The same answers /v2/resolve gives.
+    for (const name of ["python", "go", "nodejs"]) {
+      const pkgs = await resolve({ name, version: "latest" });
+      const mine = latest.find((l) => l.name === name)!;
+      expect(pkgs[0]!.version, name).toBe(mine.version);
+      expect([...new Set(pkgs.map((p) => p.system))].sort(), name).toEqual(mine.systems);
+    }
   });
 
   test("serializes to JSON with ISO timestamps", async () => {
@@ -96,5 +166,12 @@ describe("status", () => {
     const parsed = JSON.parse(JSON.stringify(s));
     expect(parsed.newest_commit.committed_at).toBe("2026-01-01T00:00:00.000Z");
     expect(typeof parsed.generated_at).toBe("string");
+    expect(parsed.latest_versions[0]).toEqual({
+      name: "python",
+      version: null,
+      attr_path: null,
+      systems: [],
+      last_updated: null,
+    });
   });
 });

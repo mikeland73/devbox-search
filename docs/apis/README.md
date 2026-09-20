@@ -76,7 +76,8 @@ critical path.
 | Method | Path | Summary | Handler |
 | --- | --- | --- | --- |
 | GET | [`/readyz`](#get-readyz) | Health check | `app/readyz/route.ts` |
-| GET | [`/status`](#get-status) | Index status | `app/status/route.ts` |
+| GET | [`/status.json`](#get-statusjson) | Index status | `app/status.json/route.ts` |
+| GET | [`/status`](#get-status) | Index status page | `app/status/route.ts` |
 | GET | [`/v2/resolve`](#get-v2resolve) | Resolve a package reference to a nixpkgs flake reference | `app/v2/resolve/route.ts` |
 | GET | [`/v2/search`](#get-v2search) | Search packages by name | `app/v2/search/route.ts` |
 | GET | [`/v2/pkg`](#get-v2pkg) | Every release of one package | `app/v2/pkg/route.ts` |
@@ -2007,14 +2008,16 @@ ok
 
 </details>
 
-### GET /status
+### GET /status.json
 
 **Index status**
 
 Index-wide statistics: exact row counts, the span of the commit
-timeline, and when each Nix system was last imported — enough to tell
-at a glance whether the daily import is keeping up, and where a
-system frozen at an older commit shows up. Cached for five minutes
+timeline, when each Nix system was last imported, and what `latest`
+resolves to for a fixed list of common packages — enough to tell at a
+glance whether the daily import is keeping up, where a system frozen
+at an older commit shows up, and whether the index is tracking
+upstream releases. Cached for five minutes
 (`Cache-Control: public, s-maxage=300, stale-while-revalidate=600`).
 
 Unlike the v1/v2 endpoints this shape is not Go-derived: timestamps
@@ -2029,6 +2032,25 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 | Status | Content-Type | Body | Description |
 | --- | --- | --- | --- |
 | 200 | `application/json` | [Status](#status) | The current index state. |
+| 500 | `text/plain; charset=utf-8` | string | The database query failed. `500 Internal Server Error`, optionally followed by `: <context>`. |
+
+### GET /status
+
+**Index status page**
+
+The numbers behind `/status.json` as a page a person can read: overview
+tiles, per-system import state against the timeline head, the commit
+timeline, and the current `latest` of each common package. Same data
+and the same five-minute cache. Not a stable format — read
+`/status.json` from scripts.
+
+Methods: `GET`, `HEAD`, `OPTIONS`
+
+#### Responses
+
+| Status | Content-Type | Body | Description |
+| --- | --- | --- | --- |
+| 200 | `text/html; charset=utf-8` | string | The current index state, as HTML. |
 | 500 | `text/plain; charset=utf-8` | string | The database query failed. `500 Internal Server Error`, optionally followed by `: <context>`. |
 
 ## Schemas
@@ -2050,7 +2072,20 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 | `last_import_at` | string (RFC 3339) or null | yes | When the most recent evaluation, on any system, was imported; `null` when nothing has been imported. |
 | `systems` | array of [SystemStatus](#systemstatus) | yes | Per-system import state, sorted by system name. |
 | `database_size_bytes` | integer | yes | `pg_database_size()` of the serving database. |
+| `latest_versions` | array of [LatestVersion](#latestversion) | yes | What `name@latest` resolves to for a fixed list of common packages (`COMMON_PACKAGES` in `lib/status.ts`: python, nodejs, go, rustc, …), in that order. Chosen exactly as `/v2/resolve` chooses. |
 | `generated_at` | string (RFC 3339) | yes | When these numbers were computed (responses are CDN-cached). |
+
+### LatestVersion
+
+The current `latest` of one package.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | The package name as a devbox user writes it, e.g. `nodejs`. |
+| `version` | string or null | yes | The version `name@latest` resolves to; `null` when the name resolves to nothing. |
+| `attr_path` | string or null | yes | The (alphabetically first) nixpkgs attribute path serving that version, e.g. `nodejs_26`. |
+| `systems` | array of string | yes | Systems the version is available on, sorted; empty when unresolved. |
+| `last_updated` | string (RFC 3339) or null | yes | The newest nixpkgs commit date among those variants; `null` when unresolved. |
 
 ### CommitRef
 
