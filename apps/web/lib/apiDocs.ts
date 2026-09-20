@@ -494,7 +494,7 @@ function anchor(heading: string): string {
 }
 
 /** Collapses a description to one table cell. Backslashes go first so an escaped pipe stays escaped. */
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text
     .trim()
     .replace(/\s*\n\s*/g, " ")

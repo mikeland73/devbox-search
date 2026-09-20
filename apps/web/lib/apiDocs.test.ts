@@ -12,6 +12,7 @@ import {
   fsRouteToSpecPaths,
   generateApiDocs,
   loadSpec,
+  oneLine,
   README_PATH,
 } from "./apiDocs";
 
@@ -26,6 +27,18 @@ describe("route discovery", () => {
 
   test("every route.ts is documented in openapi.yaml, and nothing else is", () => {
     expect(checkCoverage(loadSpec(), discoverRoutes())).toEqual([]);
+  });
+});
+
+describe("oneLine", () => {
+  test("collapses newlines and escapes table-cell delimiters", () => {
+    expect(oneLine("  a\n  b  ")).toBe("a b");
+    expect(oneLine("a | b")).toBe("a \\| b");
+  });
+
+  test("escapes backslashes so an input `\\|` cannot become a live delimiter", () => {
+    expect(oneLine("a \\ b")).toBe("a \\\\ b");
+    expect(oneLine("a \\| b")).toBe("a \\\\\\| b");
   });
 });
 
