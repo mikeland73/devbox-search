@@ -109,7 +109,8 @@ export function normalizeQuery(q: SearchQuery): SearchQuery {
 
 /**
  * The `WITH target AS (...)` predicate: match the canonical name
- * case-insensitively, or the attribute path exactly.
+ * case-insensitively, or the attribute path exactly. `term` is a parameter,
+ * or an SQL expression when the name comes from a joined row.
  *
  * Written as a semi-join on variant ids rather than
  * `lower(packages.name) = ? OR variants.attr_path = ?`: an OR spanning two
@@ -119,7 +120,7 @@ export function normalizeQuery(q: SearchQuery): SearchQuery {
  * and variants_attr_path_idx), which brings a lookup to single-digit ms.
  * See docs/query-plans.md.
  */
-function nameOrAttrPath(term: string): SQL {
+export function nameOrAttrPath(term: string | SQL): SQL {
   return sql`${variants.id} IN (
     SELECT va.id
     FROM ${packages} p
@@ -173,7 +174,7 @@ function lastSeen(variantId: SQL): SQL<number> {
  * Presence is judged per variant row, so a system filter narrows it too:
  * "latest on x86_64-linux" is what that system's evals still list.
  */
-function latestOrder(system: string | undefined): SQL[] {
+export function latestOrder(system: string | undefined): SQL[] {
   const scoped = system !== undefined && system !== "" ? sql` AND b.system = ${system}` : sql``;
   return [
     desc(sql`EXISTS (SELECT 1 FROM ${variants} b WHERE b.version_id = ${versions.id} AND NOT b.broken${scoped})`),
