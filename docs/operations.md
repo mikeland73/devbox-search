@@ -169,7 +169,7 @@ Every Vercel deployment — the preview of each PR and the production deploy of
 ready. The same script runs against any URL:
 
 ```sh
-BASE_URL=https://devbox-search.vercel.app node --test tools/integration.test.mjs
+BASE_URL=https://nixsearch.com node --test tools/integration.test.mjs
 ```
 
 Deployment Protection is off on the Vercel project: previews must be publicly
@@ -230,7 +230,7 @@ that `integration.yml` passes to `tools/integration.test.mjs`. To rotate:
 as a request header:
 
 ```sh
-curl -H "X-Rate-Limit-Override-Secret: $SECRET" https://devbox-search.vercel.app/v2/resolve?name=go&version=latest
+curl -H "X-Rate-Limit-Override-Secret: $SECRET" https://nixsearch.com/v2/resolve?name=go&version=latest
 ```
 
 Inspect what the rules are doing with `vercel firewall overview` (or the

@@ -9,8 +9,8 @@ stay byte-compatible with it so shipped CLIs keep working.
 Indexing runs on GitHub Actions (every nixpkgs-unstable release, minutes after
 it lands), data lives in Postgres (incremental-forever, never rebuilt), and the
 API is a Next.js app. Production runs on Neon + Vercel at
-https://devbox-search.vercel.app; point a CLI at it with
-`DEVBOX_SEARCH_HOST=https://devbox-search.vercel.app`.
+https://nixsearch.com; point a CLI at it with
+`DEVBOX_SEARCH_HOST=https://nixsearch.com`.
 
 ## Layout
 
@@ -49,7 +49,7 @@ Every Vercel deployment is also exercised end to end by
 runs against any URL:
 
 ```sh
-BASE_URL=https://devbox-search.vercel.app node --test tools/integration.test.mjs
+BASE_URL=https://nixsearch.com node --test tools/integration.test.mjs
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how changes flow, and

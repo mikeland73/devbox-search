@@ -4,7 +4,7 @@
 
 # devbox-search HTTP API
 
-Package resolution and search over the nixpkgs index behind search.devbox.sh.
+Package resolution and search over the nixpkgs index behind nixsearch.com.
 
 This document is generated from [`openapi.yaml`](./openapi.yaml) (the machine-readable contract - load it in
 any OpenAPI viewer) plus responses captured by running the route handlers in `apps/web/app` against the

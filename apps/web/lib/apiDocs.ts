@@ -250,7 +250,7 @@ async function loadRouteModules(routes: Route[]): Promise<Map<string, RouteModul
 async function send(mod: RouteModule, method: string, path: string): Promise<Omit<CapturedExample, "summary">> {
   const handler = mod[method];
   if (handler === undefined) throw new Error(`${method} is not exported for ${path}`);
-  const response = await handler(new Request(`https://search.devbox.sh${path}`, { method }));
+  const response = await handler(new Request(`https://nixsearch.com${path}`, { method }));
   const headers: Array<[string, string]> = [];
   for (const name of SHOWN_HEADERS) {
     const value = response.headers.get(name);
