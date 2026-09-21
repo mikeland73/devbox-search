@@ -424,10 +424,14 @@ test("python@latest is the interpreter nixpkgs-unstable ships, not a stale line 
   const body = okJson(await get(path), path);
   assert.match(body.version, /^3\.(1[4-9]|[2-9]\d)\.\d+$/, `python@latest: ${body.version}`);
   const status = okJson(await get("/status.json"), "/status.json");
+  // The interpreter is served both as the `python3` alias and as its
+  // versioned attribute (`python314`); resolve emits the first by attr_path,
+  // so either is the right answer. What must not appear is a nested path
+  // like buildbotPackages.python — the #49 symptom.
   for (const system of INDEXED_SYSTEMS) {
     const info = body.systems[system];
     assert.ok(info, `missing system ${system}`);
-    assert.match(info.flake_installable.attr_path, /^python3\d\d$/, `${system} attr_path`);
+    assert.match(info.flake_installable.attr_path, /^python3(\d\d)?$/, `${system} attr_path`);
   }
   // Present at head: last_updated is at most a few imports old, never May.
   const newest = new Date(status.newest_commit.committed_at);
