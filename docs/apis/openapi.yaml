@@ -1,6 +1,6 @@
 openapi: 3.1.0
 
-# The API contract for search.devbox.sh, served by apps/web (Next.js route
+# The API contract for nixsearch.com, served by apps/web (Next.js route
 # handlers). This file is the hand-maintained source of truth for parameters,
 # response shapes and semantics; docs/apis/README.md is GENERATED from it by
 # `pnpm --filter @devbox-search/web gen:api-docs`, which also runs every
@@ -16,7 +16,7 @@ openapi: 3.1.0
 info:
   title: devbox-search
   version: "2"
-  summary: Package resolution and search over the nixpkgs index behind search.devbox.sh.
+  summary: Package resolution and search over the nixpkgs index behind nixsearch.com.
   description: |
     Resolves Devbox package references (`python@3.11`) to nixpkgs flake
     references (commit hash + attribute path), and searches the index by
@@ -80,7 +80,7 @@ info:
       below.
 
 servers:
-  - url: https://search.devbox.sh
+  - url: https://nixsearch.com
 
 tags:
   - name: v2

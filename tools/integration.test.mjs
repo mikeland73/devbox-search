@@ -6,7 +6,7 @@
  * that just became ready — the preview for a PR, production for main. It
  * can be pointed at anything by hand:
  *
- *   BASE_URL=https://devbox-search.vercel.app node --test tools/integration.test.mjs
+ *   BASE_URL=https://nixsearch.com node --test tools/integration.test.mjs
  *
  * No dependencies (node:test + fetch), so CI needs a checkout and a Node,
  * not a pnpm install. The unit tests cover the query and render layers
@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 
 const BASE_URL = (process.env.BASE_URL ?? "").replace(/\/+$/, "");
 if (BASE_URL === "") {
-  console.error("BASE_URL is required, e.g. BASE_URL=https://devbox-search.vercel.app");
+  console.error("BASE_URL is required, e.g. BASE_URL=https://nixsearch.com");
   process.exit(2);
 }
 
