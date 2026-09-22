@@ -162,7 +162,7 @@ export const versions = pgTable(
   (t) => [
     uniqueIndex("versions_package_version_key").on(t.packageId, t.version),
     // Serves `latest` (max sort_key, optionally excluding prereleases) and
-    // the ordered version listings used by /pkg.
+    // the ordered version listings used by /v1/pkg and /v2/pkg.
     index("versions_latest_idx").on(t.packageId, t.prerelease, t.sortKey.desc()),
     // Serves npm-range constraint predicates.
     index("versions_semver_idx").on(t.packageId, t.semverMajor, t.semverMinor, t.semverPatch),

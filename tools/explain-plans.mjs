@@ -201,7 +201,7 @@ print("  remains for broad prefixes is similarity() over the prefix rows themsel
 print("  for `python`); making that cheaper means changing how that tier is ranked, not the plan.");
 print();
 
-print("## Phrase search (/v2/search, /v1/search, /search)");
+print("## Phrase search (/v2/search, /v1/search)");
 print();
 for (const phrase of PHRASES) {
   await explain(`ranked terms — q=${phrase}`, RANKED, [phrase, escapeLike(phrase)]);

@@ -575,7 +575,7 @@ export async function search(query: SearchQuery): Promise<ResultPackage[]> {
 }
 
 /**
- * Resolve semantics shared by /v1/resolve, /resolve and /v2/resolve: search
+ * Resolve semantics shared by /v1/resolve and /v2/resolve: search
  * for the requested version, and if `latest` produced nothing, retry
  * including prereleases.
  */

@@ -48,7 +48,7 @@ describe("searchByPhrase grouping", () => {
     });
     await seedPackage(t.db, { name: "go-2fa", versions: [{ version: "1.0.0" }] });
 
-    // /v1/search and /search group these by name then version, so one row
+    // /v1/search groups these by name then version, so one row
     // per version means one version entry with a single system each — the
     // shape in the golden corpus.
     const rows = await search({ phrase: "go" });

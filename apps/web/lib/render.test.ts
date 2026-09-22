@@ -3,7 +3,6 @@ import {
   group,
   omitEmpty,
   renderLegacyVersions,
-  renderSearch,
   renderV1Search,
   renderV2Pkg,
   renderV2Resolve,
@@ -289,27 +288,5 @@ describe("renderV1Search", () => {
 
   test("no results omits the packages key entirely", () => {
     expect(renderV1Search([])).toEqual({ num_results: 0 });
-  });
-});
-
-describe("renderSearch (/search shape)", () => {
-  test("wraps results in metadata and compacts by pname+version", () => {
-    const rendered = renderSearch([
-      pkg({ name: "python", system: "x86_64-linux" }),
-      // Same pname+version on another system collapses away.
-      pkg({ name: "python", system: "aarch64-linux" }),
-      pkg({ name: "python", version: "3.10.0", storeVersion: "3.10.0", metaName: "python3-3.10.0" }),
-    ]) as Record<string, unknown>;
-
-    expect(rendered["metadata"]).toEqual({ total_results: 1 });
-    const results = rendered["results"] as Array<Record<string, unknown>>;
-    const packages = results[0]!["packages"] as Array<Record<string, unknown>>;
-    expect(packages).toHaveLength(2);
-    expect(packages[0]).toMatchObject({
-      attribute_path: "python311",
-      pname: "python3-3.11.9",
-      version: "3.11.9",
-      date: "2024-03-08T13:51:52Z",
-    });
   });
 });

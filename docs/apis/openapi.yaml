@@ -37,7 +37,7 @@ info:
     * **Name matching.** Wherever a `name` is accepted it matches either the
       canonical package name *case-insensitively* or a nixpkgs attribute path
       *case-sensitively* (`python`, `python311`, `nodePackages.typescript`).
-    * **Version matching** (`version` / `v` parameters):
+    * **Version matching** (`version` parameter):
       * `latest` — the highest non-prerelease version still present in
         nixpkgs, preferring one that is not marked broken. A version nixpkgs
         has dropped or renamed away from (go-font's `2017-03-30` snapshot,
@@ -86,7 +86,7 @@ tags:
   - name: v2
     description: Current API, used by the devbox CLI.
   - name: v1
-    description: Legacy API kept for older devbox CLIs. `/resolve`, `/pkg` and `/db/search` are aliases.
+    description: The original API shape, still called by the devbox CLI alongside v2.
   - name: ops
     description: Health check and index status. Not part of the Go service's API.
 
@@ -322,37 +322,6 @@ paths:
         "500":
           $ref: "#/components/responses/ServerError"
 
-  /resolve:
-    get:
-      tags: [v1]
-      operationId: resolve
-      summary: Alias of /v1/resolve
-      description: Identical to `/v1/resolve`.
-      x-example-requests:
-        - summary: Partial version
-          path: /resolve?name=python&version=3.11
-      parameters:
-        - $ref: "#/components/parameters/name"
-        - $ref: "#/components/parameters/version"
-        - $ref: "#/components/parameters/system"
-      responses:
-        "200":
-          description: The resolved version.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V1PackageVersion"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "404":
-          description: No version matches.
-          content:
-            text/plain; charset=utf-8:
-              schema:
-                type: string
-        "500":
-          $ref: "#/components/responses/ServerError"
-
   /v1/pkg:
     get:
       tags: [v1]
@@ -388,79 +357,6 @@ paths:
         "500":
           $ref: "#/components/responses/ServerError"
 
-  /pkg/{name}:
-    get:
-      tags: [v1]
-      operationId: pkgByPath
-      summary: Alias of /v1/pkg with the name in the path
-      description: |
-        Identical to `/v1/pkg`, taking the package name from the path.
-        **Everything** after `/pkg/` is the name — including dots and
-        further slashes (`/pkg/nodePackages.typescript`) — after URL
-        decoding.
-      x-example-requests:
-        - summary: Dotted attribute path in the URL
-          path: /pkg/nodePackages.typescript
-      parameters:
-        - name: name
-          in: path
-          required: true
-          description: The package name or attribute path; the entire remainder of the URL path.
-          schema:
-            type: string
-      responses:
-        "200":
-          description: The package's versions.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/V1PackageVersion"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "404":
-          description: No package by that name.
-          content:
-            text/plain; charset=utf-8:
-              schema:
-                type: string
-        "500":
-          $ref: "#/components/responses/ServerError"
-
-  /pkg:
-    get:
-      tags: [v1]
-      operationId: pkgByQuery
-      summary: Alias of /v1/pkg
-      description: Identical to `/v1/pkg`; used when no name is given in the path.
-      x-example-requests:
-        - summary: Query-string form
-          path: /pkg?name=go
-        - summary: Missing name
-          path: /pkg
-      parameters:
-        - $ref: "#/components/parameters/name"
-      responses:
-        "200":
-          description: The package's versions.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/V1PackageVersion"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "404":
-          description: No package by that name.
-          content:
-            text/plain; charset=utf-8:
-              schema:
-                type: string
-        "500":
-          $ref: "#/components/responses/ServerError"
-
   /v1/search:
     get:
       tags: [v1]
@@ -484,70 +380,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V1Search"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "500":
-          $ref: "#/components/responses/ServerError"
-
-  /db/search:
-    get:
-      tags: [v1]
-      operationId: dbSearch
-      summary: Alias of /v1/search
-      description: Identical to `/v1/search`.
-      x-example-requests:
-        - summary: Search
-          path: /db/search?q=go
-      parameters:
-        - $ref: "#/components/parameters/q"
-      responses:
-        "200":
-          description: Matching packages, best match first.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V1Search"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "500":
-          $ref: "#/components/responses/ServerError"
-
-  /search:
-    get:
-      tags: [v1]
-      operationId: search
-      summary: Search packages (oldest shape)
-      description: |
-        The original search endpoint. Without `v`, `q` is a search phrase
-        (same ranking as `/v2/search`, every version returned). With `v`,
-        `q` is treated as an exact **name** and the single version matching
-        `v` is returned (same rules as `/v2/resolve`).
-
-        Within each result, entries are collapsed to one per
-        `pname`+`version` (consecutive duplicates across systems are
-        dropped). An empty result set is `200` with `total_results: 0`.
-      x-example-requests:
-        - summary: Phrase search
-          path: /search?q=python
-        - summary: Name + version lookup
-          path: /search?q=python&v=3.11
-        - summary: Missing query
-          path: /search
-      parameters:
-        - $ref: "#/components/parameters/q"
-        - name: v
-          in: query
-          required: false
-          description: A version (see *Version matching*). When present, `q` is matched as an exact name rather than a search phrase.
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Matching packages.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/Search"
         "400":
           $ref: "#/components/responses/BadRequest"
         "500":
@@ -1026,50 +858,3 @@ components:
           description: Newest first. **omitempty**.
           items:
             $ref: "#/components/schemas/V1PackageVersion"
-
-    Search:
-      type: object
-      required: [metadata, results]
-      properties:
-        metadata:
-          type: object
-          required: [total_results]
-          properties:
-            total_results:
-              type: integer
-              description: Number of entries in `results`.
-        results:
-          type: array
-          items:
-            $ref: "#/components/schemas/SearchResult"
-
-    SearchResult:
-      type: object
-      required: [name, packages]
-      properties:
-        name:
-          type: string
-        packages:
-          type: array
-          description: One entry per `pname`+`version`, newest first.
-          items:
-            $ref: "#/components/schemas/SearchPackage"
-
-    SearchPackage:
-      type: object
-      description: Every field is **omitempty**.
-      properties:
-        attribute_path:
-          type: string
-        pname:
-          type: string
-          description: "`meta.name` of the derivation."
-        version:
-          type: string
-        date:
-          type: string
-          format: date-time
-          description: Commit date (RFC 3339).
-        nixpkg_commit:
-          type: string
-          description: nixpkgs commit hash.

@@ -328,7 +328,7 @@ export function renderLegacyVersions(pkgs: ResultPackage[]): unknown[] {
   });
 }
 
-/** /v1/search and /db/search. */
+/** /v1/search. */
 export function renderV1Search(pkgs: ResultPackage[]): unknown {
   const packages = group(pkgs, byName).map((nameGroup) => {
     const versions = renderLegacyVersions(nameGroup);
@@ -342,35 +342,4 @@ export function renderV1Search(pkgs: ResultPackage[]): unknown {
     num_results: packages.length,
     ...(packages.length > 0 ? { packages } : {}),
   };
-}
-
-/** /search (the oldest endpoint shape). */
-export function renderSearch(pkgs: ResultPackage[]): unknown {
-  const results = group(pkgs, byName).map((nameGroup) => ({
-    name: nameGroup[0]!.name,
-    packages: compactByPnameVersion(nameGroup),
-  }));
-  return {
-    metadata: { total_results: results.length },
-    results,
-  };
-}
-
-/**
- * Port of pkgsToPackageInfoList + slices.CompactFunc: legacy package lists
- * return a single system and attribute path per pname+version, collapsing
- * *consecutive* duplicates only.
- */
-function compactByPnameVersion(pkgs: ResultPackage[]): unknown[] {
-  const list = pkgs.map((p) => ({
-    attribute_path: p.attrPath,
-    pname: p.metaName,
-    version: p.storeVersion,
-    date: rfc3339(p.lastUpdated),
-    nixpkg_commit: p.commitHash,
-  }));
-  const compacted = list.filter(
-    (item, i) => i === 0 || !(item.pname === list[i - 1]!.pname && item.version === list[i - 1]!.version),
-  );
-  return compacted.map((item) => omitEmpty(item as unknown as Record<string, unknown>));
 }

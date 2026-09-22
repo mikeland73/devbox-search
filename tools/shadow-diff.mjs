@@ -47,7 +47,7 @@ function parseArgs() {
 }
 
 /** Endpoints whose divergences gate the migration. */
-const isResolve = (path) => /^\/(v1\/|v2\/)?resolve\b/.test(path) || /^\/search\?.*[?&]v=/.test(path);
+const isResolve = (path) => /^\/v[12]\/resolve\b/.test(path);
 
 // ---------------------------------------------------------------------------
 // Classification
@@ -179,7 +179,7 @@ async function main() {
       record.old = truncate(oldText);
       record.new = truncate(newText);
     } else {
-      // Non-resolve endpoints (search ranking, /pkg listings) are allowed to
+      // Non-resolve endpoints (search ranking, pkg listings) are allowed to
       // drift; they are reported but do not gate.
       record.verdict = "non-gating-diff";
     }

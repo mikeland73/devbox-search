@@ -30,7 +30,7 @@ Table sizes: packages=250731, versions=1468104, variants=3833368, search_terms=2
   remains for broad prefixes is similarity() over the prefix rows themselves (~0.4 s
   for `python`); making that cheaper means changing how that tier is ranked, not the plan.
 
-## Phrase search (/v2/search, /v1/search, /search)
+## Phrase search (/v2/search, /v1/search)
 
 ### ranked terms — q=go
 
