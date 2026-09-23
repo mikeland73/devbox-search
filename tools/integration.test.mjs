@@ -71,7 +71,7 @@ async function get(path) {
     signal: AbortSignal.timeout(60_000),
     headers: HEADERS,
     // The Go service never redirected, so a 3xx is a finding, not a hop to
-    // follow: `/pkg/` → 308 → `/pkg` → 400 would otherwise pass as a 400.
+    // follow: `/v1/pkg/` → 308 → `/v1/pkg` → 400 would otherwise pass as a 400.
     redirect: "manual",
   });
   const text = await res.text();
@@ -197,10 +197,10 @@ test("GET /status is the same numbers as a page", async () => {
 test("trailing slashes are served, not redirected", async () => {
   assert.equal((await get("/readyz/")).status, 200, "/readyz/");
   assertError(
-    await get("/pkg/"),
+    await get("/v1/pkg/"),
     400,
     "400 Bad Request: empty name (set a ?name=<value> query parameter)",
-    "/pkg/",
+    "/v1/pkg/",
   );
   const path = "/v2/resolve/?name=go&version=1.22";
   const body = okJson(await get(path), path);
@@ -311,20 +311,6 @@ test("GET /v1/resolve?name=go&version=1.22 resolves to the frozen 1.22.12", asyn
     assert.deepEqual(info.attr_paths, [GO_1_22.attrPath], `${system} attr_paths`);
     assert.deepEqual(info.programs, ["go"], `${system} programs`);
   }
-});
-
-test("GET /search?q=go&v=1.22 (oldest shape) resolves to the frozen 1.22.12", async () => {
-  const path = "/search?q=go&v=1.22";
-  const body = okJson(await get(path), path);
-
-  assert.equal(body.metadata.total_results, 1);
-  assert.equal(body.results[0].name, "go");
-  const pkg = body.results[0].packages[0];
-  assert.equal(pkg.attribute_path, GO_1_22.attrPath);
-  assert.equal(pkg.pname, "go-1.22.12");
-  assert.equal(pkg.version, GO_1_22.version);
-  assert.equal(pkg.nixpkg_commit, GO_1_22.revs["aarch64-darwin"]);
-  assert.match(pkg.date, RFC3339);
 });
 
 // ---------------------------------------------------------------------------

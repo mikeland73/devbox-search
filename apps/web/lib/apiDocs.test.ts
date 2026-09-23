@@ -19,7 +19,7 @@ import {
 describe("route discovery", () => {
   test("maps Next.js route directories to OpenAPI paths", () => {
     expect(fsRouteToSpecPaths("v2/resolve")).toEqual(["/v2/resolve"]);
-    expect(fsRouteToSpecPaths("pkg/[[...name]]")).toEqual(["/pkg", "/pkg/{name}"]);
+    expect(fsRouteToSpecPaths("a/[[...rest]]")).toEqual(["/a", "/a/{rest}"]);
     expect(fsRouteToSpecPaths("a/[...rest]")).toEqual(["/a/{rest}"]);
     expect(fsRouteToSpecPaths("(group)/x/[id]")).toEqual(["/x/{id}"]);
     expect(fsRouteToSpecPaths("")).toEqual(["/"]);

@@ -54,17 +54,15 @@ add("/v2/resolve?version=latest"); // missing name error shape
 add("/v2/resolve?name=python&version=%25"); // LIKE wildcard hygiene probe
 add("/v2/resolve?name=python&version=3_11"); // LIKE underscore probe
 
-// v1/resolve and /resolve (+system).
-for (const path of ["/v1/resolve", "/resolve"]) {
-  add(`${path}?name=python&version=latest`);
-  add(`${path}?name=python&version=3.11`);
-  add(`${path}?name=go&version=latest`);
-  add(`${path}?name=hello&version=latest`);
-  add(`${path}?name=python&version=latest&system=aarch64-darwin`);
-  add(`${path}?name=python&version=3.11&system=x86_64-linux`);
-  add(`${path}?name=doesnotexist12345&version=latest`);
-  add(`${path}?name=python`); // missing version shape
-}
+// v1/resolve (+system).
+add("/v1/resolve?name=python&version=latest");
+add("/v1/resolve?name=python&version=3.11");
+add("/v1/resolve?name=go&version=latest");
+add("/v1/resolve?name=hello&version=latest");
+add("/v1/resolve?name=python&version=latest&system=aarch64-darwin");
+add("/v1/resolve?name=python&version=3.11&system=x86_64-linux");
+add("/v1/resolve?name=doesnotexist12345&version=latest");
+add("/v1/resolve?name=python"); // missing version shape
 
 // v2/pkg.
 for (const name of ["go", "python", "hello", "nodePackages.typescript", "openssl", "doesnotexist12345"]) {
@@ -72,26 +70,18 @@ for (const name of ["go", "python", "hello", "nodePackages.typescript", "openssl
 }
 add("/v2/pkg"); // missing name error shape
 
-// v1/pkg + legacy /pkg (path form takes everything after the first segment).
+// v1/pkg.
 add("/v1/pkg?name=go");
 add("/v1/pkg?name=python");
 add("/v1/pkg?name=doesnotexist12345");
-add("/pkg/go");
-add("/pkg/nodePackages.typescript"); // dots in path
-add("/pkg?name=hello");
-add("/pkg/"); // empty name shape
+add("/v1/pkg"); // missing name error shape
 
 // Search endpoints.
 for (const q of ["go", "python", "sqlite", "web server", "qué", "c++"]) {
   add(`/v2/search?q=${encodeURIComponent(q)}`);
   add(`/v1/search?q=${encodeURIComponent(q)}`);
 }
-add("/db/search?q=go");
 add("/v2/search?q="); // empty query error shape
-add("/search?q=go");
-add("/search?q=python&v=3.11");
-add("/search?q=python&v=latest");
-add("/search?q=go&v=latest");
 
 async function main() {
   await mkdir(outDir, { recursive: true });

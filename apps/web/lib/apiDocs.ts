@@ -102,7 +102,7 @@ export function loadSpec(path: string = SPEC_PATH): Spec {
 export interface Route {
   /** Absolute path of the route.ts module. */
   file: string;
-  /** The app-relative route directory, e.g. `pkg/[[...name]]`. */
+  /** The app-relative route directory, e.g. `v2/resolve`. */
   fsRoute: string;
   /** The OpenAPI paths this module serves. */
   specPaths: string[];
