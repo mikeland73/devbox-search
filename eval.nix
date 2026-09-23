@@ -1,4 +1,4 @@
-# The expression nix-env evaluates. It is nixpkgs, with one adjustment.
+# The expression nix-env evaluates. It is nixpkgs, with two adjustments.
 #
 # nix-env lists each derivation once: it walks attributes in lexicographic
 # order, recursing into sets that ask for it, and skips any attribute set it
@@ -19,13 +19,32 @@
 #
 # Cost: the ~25k top-level attributes are forced up front rather than on the
 # way (nix-env forces all of them anyway), plus one shallow copy each.
+#
+# Second: nixpkgs sometimes turns a package into an alias while other
+# nixpkgs code still refers to it by the old name. packages-config.nix turns
+# aliases off, so that reference is a missing attribute: an error nix-env
+# cannot skip, which aborts the whole eval. Upstream's own search eval never
+# gets that far, because its unfree check throws first; we allow unfree.
+# Hit when `cudatoolkit` became an alias (nixpkgs#565306, 2026-09-20) while
+# haskellPackages.{cuda,cufft,nvvm} still read `pkgs.cudatoolkit`. Each shim
+# puts the attribute back only where nixpkgs lacks it, and the output drops
+# it again so it is listed exactly as often as the alias would be: never.
+# Drop a shim once nixpkgs stops referring to the old name.
 { config, system }:
 let
-  pkgs = import ./nixpkgs { inherit config system; };
+  shims = pkgs: {
+    cudatoolkit = pkgs.cudaPackages.cudatoolkit;
+  };
+  addShims = final: prev:
+    let added = removeAttrs (shims final) (builtins.attrNames prev);
+    in added // { _devboxSearchShims = builtins.attrNames added; };
+  pkgs = import ./nixpkgs { inherit config system; overlays = [ addShims ]; };
   inherit (pkgs) lib;
   # tryEval catches the same errors nix-env ignores (assertion failures and
   # throws, e.g. a removed alias); anything else already aborted the eval.
   isDerivation = _: v: let r = builtins.tryEval (lib.isDerivation v); in r.success && r.value;
   topLevel = lib.filterAttrs isDerivation pkgs;
 in
-pkgs // lib.mapAttrs (_: drv: drv // { _devboxSearchTopLevel = true; }) topLevel
+removeAttrs
+  (pkgs // lib.mapAttrs (_: drv: drv // { _devboxSearchTopLevel = true; }) topLevel)
+  (pkgs._devboxSearchShims ++ [ "_devboxSearchShims" ])
