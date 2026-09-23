@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      pull-requests: read
       issues: read
       id-token: write
 
@@ -36,17 +36,7 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
-          # Transcript in the job log. Runs still end after ~5 turns with a
-          # permission denial and no comment; this is the only way to see why.
-          show_full_output: true
-          # The plugin only posts to GitHub when given --comment; without it the
-          # review is printed to the (hidden) job log and nothing reaches the PR.
-          prompt: '/code-review:code-review https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
-          # In prompt mode the action grants no tools beyond read-only ones, so
-          # the plugin's `gh pr ...` calls were being denied. The inline-comment
-          # MCP server is only mounted when it appears in --allowedTools.
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"
+          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
