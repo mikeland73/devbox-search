@@ -44,8 +44,14 @@ pnpm, psql, aws, jq); nothing else needs installing.
 devbox shell         # or `devbox run <script>` for one-offs
 devbox run setup     # pnpm install + build every package
 devbox run check     # lint, typecheck, all workspace tests
-devbox run dev       # next dev, needs DATABASE_URL (see .env.example)
+devbox run env:setup # write .env (Vercel if linked, else from .env.example)
+devbox run dev       # env:setup, then next dev on http://localhost:3000
 ```
+
+`dev` runs `env:setup` first, so a fresh checkout either comes up against a
+real database or stops and says what is missing. `.env` is loaded into every
+`devbox run` script (`env_from`), and is never overwritten once it exists —
+edit it freely, or export `DATABASE_URL` in your shell to bypass it.
 
 `pnpm test`, `pnpm lint` and `pnpm typecheck` work as usual inside the shell.
 The unit suite needs no database: the query tests run against PGlite in

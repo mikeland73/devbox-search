@@ -26,7 +26,8 @@ publishes; the second is used here under the name `DATABASE_URL_DIRECT`.
 Storage grows roughly 1–2 GB per year of daily imports; Neon's free tier
 (0.5 GB) covers the first few months.
 
-`.env.example` lists everything.
+`.env.example` lists everything; `devbox run env:setup` copies it to `.env`
+for you, which every `devbox run` script then loads.
 
 ## 2. Schema
 
