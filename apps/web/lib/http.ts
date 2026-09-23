@@ -41,16 +41,26 @@ export function json(body: unknown, init: { status?: number; cacheControl?: stri
 }
 
 /** An HTML page with the same caching headers and weak ETag as {@link json}. */
-export function html(body: string, init: { cacheControl?: string } = {}): Response {
+export function html(body: string, init: { cacheControl?: string; status?: number } = {}): Response {
   const etag = `"${createHash("sha256").update(body).digest("base64url").slice(0, 27)}"`;
   return new Response(body, {
-    status: 200,
+    status: init.status ?? 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": init.cacheControl ?? CACHE_CONTROL,
       ETag: etag,
     },
   });
+}
+
+/**
+ * A redirect, for the site pages that stand where an API alias used to
+ * (`/pkg?name=python`, `/resolve?name=…`). 302, not 308: these are
+ * conveniences pointing at the canonical page, and the target shape is
+ * ours to change.
+ */
+export function redirect(location: string, cacheControl: string = CACHE_CONTROL): Response {
+  return new Response(null, { status: 302, headers: { Location: location, "Cache-Control": cacheControl } });
 }
 
 /** A plain-text error body identical to Go's http.Error output. */

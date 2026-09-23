@@ -492,7 +492,7 @@ GET /v2/search?q=go
 HTTP/1.1 200
 Content-Type: application/json
 Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400
-ETag: "9lkUf2mfmc96w2pxl-JayMw5B28"
+ETag: "v0qkk-08jJeSUYPtJ37fxpyzkPm"
 
 {
   "query": "go",
@@ -501,12 +501,24 @@ ETag: "9lkUf2mfmc96w2pxl-JayMw5B28"
     {
       "name": "go",
       "summary": "The Go Programming language",
-      "last_updated": "2026-01-03T00:00:00Z"
+      "last_updated": "2026-01-03T00:00:00Z",
+      "version": "1.22.5",
+      "attribute_path": "go",
+      "systems": [
+        "aarch64-darwin",
+        "x86_64-linux"
+      ]
     },
     {
       "name": "go-task",
       "summary": "Task runner / simpler Make alternative written in Go",
-      "last_updated": "2026-01-02T00:00:00Z"
+      "last_updated": "2026-01-02T00:00:00Z",
+      "version": "3.38.0",
+      "attribute_path": "go-task",
+      "systems": [
+        "aarch64-darwin",
+        "x86_64-linux"
+      ]
     }
   ]
 }
@@ -573,13 +585,18 @@ GET /v2/pkg?name=python
 HTTP/1.1 200
 Content-Type: application/json
 Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400
-ETag: "XkwiWyiN4Sd1diHPDbJK29F3VVQ"
+ETag: "yz6g8D2t9AX9qU6O68kwgULB8mu"
 
 {
   "name": "python",
   "summary": "High-level dynamically-typed programming language",
+  "description": "",
   "homepage_url": "https://www.python.org",
   "license": "PSF-2.0",
+  "attribute_paths": [
+    "python311",
+    "python312"
+  ],
   "releases": [
     {
       "version": "3.12.4",
@@ -598,7 +615,9 @@ ETag: "XkwiWyiN4Sd1diHPDbJK29F3VVQ"
               "path": "/nix/store/8a7275a9a292b363bfe0d662f44ce21d-python-3.12.4-aarch64-darwin",
               "default": true
             }
-          ]
+          ],
+          "broken": false,
+          "insecure": false
         },
         {
           "arch": "x86-64",
@@ -613,11 +632,16 @@ ETag: "XkwiWyiN4Sd1diHPDbJK29F3VVQ"
               "path": "/nix/store/6f0235f7014606fad755bf2a3e326aee-python-3.12.4-x86_64-linux",
               "default": true
             }
-          ]
+          ],
+          "broken": false,
+          "insecure": false
         }
       ],
       "platforms_summary": "Linux and macOS (Apple Silicon only)",
-      "outputs_summary": ""
+      "outputs_summary": "",
+      "prerelease": false,
+      "broken": false,
+      "insecure": false
     },
     {
       "version": "3.11.9",
@@ -636,7 +660,9 @@ ETag: "XkwiWyiN4Sd1diHPDbJK29F3VVQ"
               "path": "/nix/store/41dde5f93f34661d63cba069c93cc222-python-3.11.9-aarch64-darwin",
               "default": true
             }
-          ]
+          ],
+          "broken": false,
+          "insecure": false
         },
         {
           "arch": "x86-64",
@@ -651,11 +677,16 @@ ETag: "XkwiWyiN4Sd1diHPDbJK29F3VVQ"
               "path": "/nix/store/79520992a3dc8137d26dacc98d7fcd66-python-3.11.9-x86_64-linux",
               "default": true
             }
-          ]
+          ],
+          "broken": false,
+          "insecure": false
         }
       ],
       "platforms_summary": "Linux and macOS (Apple Silicon only)",
-      "outputs_summary": ""
+      "outputs_summary": "",
+      "prerelease": false,
+      "broken": false,
+      "insecure": false
     }
   ]
 }
@@ -1426,11 +1457,16 @@ A derivation output. Every field is **omitempty**; in particular `default` is on
 
 ### V2SearchResult
 
+One matching package, at the release `latest` resolves to.
+
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `name` | string | yes |  |
 | `summary` | string | yes |  |
 | `last_updated` | string (RFC 3339) | yes | Commit date of the package's latest release. |
+| `version` | string | yes | The latest non-prerelease version (what `?version=latest` would resolve to). |
+| `attribute_path` | string | yes | The (alphabetically first) nixpkgs attribute path serving that version. |
+| `systems` | array of string | yes | Systems that version exists on, sorted. |
 
 ### V2Pkg
 
@@ -1438,8 +1474,10 @@ A derivation output. Every field is **omitempty**; in particular `default` is on
 | --- | --- | --- | --- |
 | `name` | string | yes |  |
 | `summary` | string | yes |  |
+| `description` | string | yes | Long description (`meta.longDescription`); empty when the package has none. |
 | `homepage_url` | string | yes |  |
 | `license` | string | yes | SPDX identifier, or the license's short name when it has none. |
+| `attribute_paths` | array of string | yes | Every attribute path that yields this package, across all versions and systems, sorted. |
 | `releases` | array of [V2Release](#v2release) | yes | Newest version first. |
 
 ### V2Release
@@ -1451,6 +1489,9 @@ A derivation output. Every field is **omitempty**; in particular `default` is on
 | `platforms` | array of [V2Platform](#v2platform) | yes | One entry per system (a system with several attribute paths is listed once). |
 | `platforms_summary` | string | yes | Display string such as `Linux and macOS (Apple Silicon only)`; empty when no supported platform is present. |
 | `outputs_summary` | string | yes | Display string such as `out, debug (Linux only)`; empty when every output is installed by default. |
+| `prerelease` | boolean | yes | Whether the version is a prerelease (`3.14.0rc1`). `latest` never picks one. |
+| `broken` | boolean | yes | Whether `meta.broken` is set on *every* platform in `platforms`. A version still usable somewhere is not a broken release; the per-platform flags say where. |
+| `insecure` | boolean | yes | As `broken`, for `meta.insecure`. |
 
 ### V2Platform
 
@@ -1463,6 +1504,8 @@ A derivation output. Every field is **omitempty**; in particular `default` is on
 | `commit_hash` | string | yes | nixpkgs commit of this variant's last change. |
 | `date` | string (RFC 3339) | yes |  |
 | `outputs` | array of [Output](#output) | yes |  |
+| `broken` | boolean | yes | `meta.broken` for this system. |
+| `insecure` | boolean | yes | `meta.insecure` for this system. |
 
 ### V1PackageVersion
 

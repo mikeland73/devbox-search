@@ -75,13 +75,86 @@ export const bySystem = (p: ResultPackage): string => p.system;
 // ---------------------------------------------------------------------------
 
 /**
+ * The v2 shapes, as TypeScript. These are the JSON contract (openapi.yaml
+ * is the source of truth for it), written out here so the pages in
+ * lib/site can render the same objects the API serves without re-deriving
+ * anything or casting. Optional fields are the ones Go omitted.
+ */
+export interface V2Output {
+  name?: string;
+  path?: string;
+  default?: boolean;
+}
+
+export interface V2ResolveSystem {
+  flake_installable: { ref: { type: string; owner: string; repo: string; rev: string }; attr_path: string };
+  last_updated: string;
+  outputs?: V2Output[];
+}
+
+export interface V2Resolve {
+  name: string;
+  version: string;
+  summary: string;
+  systems: Record<string, V2ResolveSystem>;
+}
+
+export interface V2SearchResult {
+  name: string;
+  summary: string;
+  last_updated: string;
+  version: string;
+  attribute_path: string;
+  systems: string[];
+}
+
+export interface V2Search {
+  query: string;
+  total_results: number;
+  results: V2SearchResult[];
+}
+
+export interface V2Platform {
+  arch: string;
+  os: string;
+  system: string;
+  attribute_path: string;
+  commit_hash: string;
+  date: string;
+  outputs: V2Output[];
+  broken: boolean;
+  insecure: boolean;
+}
+
+export interface V2Release {
+  version: string;
+  last_updated: string;
+  platforms: V2Platform[];
+  platforms_summary: string;
+  outputs_summary: string;
+  prerelease: boolean;
+  broken: boolean;
+  insecure: boolean;
+}
+
+export interface V2Pkg {
+  name: string;
+  summary: string;
+  description: string;
+  homepage_url: string;
+  license: string;
+  attribute_paths: string[];
+  releases: V2Release[];
+}
+
+/**
  * /v2/resolve. `outputs` is omitempty; everything else is always present.
  *
  * Sanctioned change #2 (single-hash resolution) is applied by the caller
  * choosing one commit for all systems; the shape is unchanged either way.
  */
-export function renderV2Resolve(pkgs: ResultPackage[]): unknown {
-  const systems: Record<string, unknown> = {};
+export function renderV2Resolve(pkgs: ResultPackage[]): V2Resolve {
+  const systems: Record<string, V2ResolveSystem> = {};
   for (const pkg of pkgs) {
     // There can be more than one attribute path per name+version+system.
     // Always use the first (rows arrive sorted by attribute path).
@@ -104,12 +177,20 @@ export function renderV2Resolve(pkgs: ResultPackage[]): unknown {
 }
 
 /** nixpkgs.Output with omitempty on every field. */
-function renderOutput(o: { name: string; path: string; default: boolean }): unknown {
+function renderOutput(o: { name: string; path: string; default: boolean }): V2Output {
   return omitEmpty({ name: o.name, path: o.path, default: o.default });
 }
 
-/** /v2/search. */
-export function renderV2Search(query: string, pkgs: ResultPackage[]): unknown {
+/**
+ * /v2/search.
+ *
+ * `version`, `attribute_path` and `systems` describe the release the row
+ * already is (the searcher returns one row per package, at its `latest`);
+ * they were added so a result can be acted on without a second request.
+ * Adding fields is safe for shipped CLIs: Go's encoding/json ignores
+ * unknown ones, and nothing that was here moved or changed meaning.
+ */
+export function renderV2Search(query: string, pkgs: ResultPackage[]): V2Search {
   return {
     query,
     total_results: pkgs.length,
@@ -117,20 +198,23 @@ export function renderV2Search(query: string, pkgs: ResultPackage[]): unknown {
       name: p.name,
       summary: p.summary,
       last_updated: rfc3339(p.lastUpdated),
+      version: p.version,
+      attribute_path: p.attrPath,
+      systems: p.versionSystems ?? [p.system],
     })),
   };
 }
 
 /** /v2/pkg. */
-export function renderV2Pkg(pkgs: ResultPackage[]): unknown {
-  const releases = group(pkgs, byVersion).map((groupPkgs) => {
-    const platforms: Array<Record<string, unknown>> = [];
+export function renderV2Pkg(pkgs: ResultPackage[]): V2Pkg {
+  const releases: V2Release[] = group(pkgs, byVersion).map((groupPkgs) => {
+    const platforms: V2Platform[] = [];
     let lastUpdated = new Date(0);
     for (const pkg of groupPkgs) {
       const { arch, os } = archOs(pkg.system);
       // More than one package per system is possible when a package has
       // multiple attribute paths; only the first is used.
-      if (platforms.some((p) => p["arch"] === arch && p["os"] === os)) continue;
+      if (platforms.some((p) => p.arch === arch && p.os === os)) continue;
       if (pkg.lastUpdated > lastUpdated) lastUpdated = pkg.lastUpdated;
       platforms.push({
         arch,
@@ -140,6 +224,8 @@ export function renderV2Pkg(pkgs: ResultPackage[]): unknown {
         commit_hash: pkg.commitHash,
         date: rfc3339(pkg.lastUpdated),
         outputs: pkg.outputs.map(renderOutput),
+        broken: pkg.broken,
+        insecure: pkg.insecure,
       });
     }
     return {
@@ -148,14 +234,25 @@ export function renderV2Pkg(pkgs: ResultPackage[]): unknown {
       platforms,
       platforms_summary: summarizePlatforms(groupPkgs),
       outputs_summary: summarizeOutputs(groupPkgs),
+      prerelease: groupPkgs[0]!.prerelease,
+      // A release is only called broken when nixpkgs marks it broken
+      // *everywhere* it exists. `broken` is a per-variant fact, and a
+      // version that still builds on some system is not a broken release;
+      // which systems those are is in `platforms`.
+      broken: groupPkgs.every((p) => p.broken),
+      insecure: groupPkgs.every((p) => p.insecure),
     };
   });
 
   return {
     name: pkgs[0]!.name,
     summary: pkgs[0]!.summary,
+    description: pkgs[0]!.description,
     homepage_url: pkgs[0]!.homepage,
     license: pkgs[0]!.license,
+    // Every attribute path that yields this package, across all of its
+    // versions and systems — the names it can be asked for by.
+    attribute_paths: [...new Set(pkgs.map((p) => p.attrPath))].sort(),
     releases,
   };
 }

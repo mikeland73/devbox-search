@@ -5,8 +5,11 @@
  */
 
 import { describe, expect, test } from "vitest";
-import type { CommitRef, Status } from "./status";
-import { bytes, esc, relative, renderStatusPage } from "./statusPage";
+import type { CommitRef, Status } from "../status";
+import { bytes, esc, relative } from "./format";
+import { renderStatusPage } from "./statusPage";
+
+const ORIGIN = "https://nixsearch.com";
 
 const commit = (seq: number, day: number): CommitRef => ({
   seq,
@@ -78,7 +81,7 @@ const healthy: Status = {
 
 describe("renderStatusPage", () => {
   test("a healthy index", () => {
-    const page = renderStatusPage(healthy);
+    const page = renderStatusPage(healthy, ORIGIN);
     expect(page).toMatch(/^<!doctype html>/);
     expect(page).toContain('<a href="/status.json">');
 
@@ -95,17 +98,19 @@ describe("renderStatusPage", () => {
     expect(page).toContain("2.35.3");
     expect(page).toContain(`href="https://github.com/NixOS/nixpkgs/commit/${"af0".padStart(40, "0")}"`);
 
-    // Latest versions: a check per system, a gap where a version is missing.
+    // Latest versions: a cell per system, a gap where a version is missing,
+    // and the package name links to its page.
     expect(page).toContain("1.27.0");
     expect(page).toContain("go_1_27");
-    const goRow = page.slice(page.indexOf("<code>go</code>"), page.indexOf("<code>python</code>"));
-    expect(goRow.match(/class="check yes"/g)).toHaveLength(3);
+    expect(page).toContain('href="/pkg/go"');
+    const goRow = page.slice(page.indexOf('href="/pkg/go"'), page.indexOf('href="/pkg/python"'));
+    expect(goRow.match(/class="y"/g)).toHaveLength(3);
     expect(goRow).toContain('title="not on x86_64-darwin"');
     expect(page).toContain("does not resolve");
   });
 
   test("an empty index", () => {
-    const page = renderStatusPage(empty);
+    const page = renderStatusPage(empty, ORIGIN);
     expect(page).toContain("Nothing has been imported.");
     expect(page).toContain(">never<");
     expect(page).toContain("7.6 MiB");
@@ -120,14 +125,18 @@ describe("renderStatusPage", () => {
         { name: "a&b", version: "<1>", attr_path: "x'y", systems: ["<sys>"], last_updated: new Date(0) },
       ],
     };
-    const page = renderStatusPage(hostile);
-    expect(page).not.toContain("<script>");
+    const page = renderStatusPage(hostile, ORIGIN);
+    // The shell carries exactly one <script> (the progressive
+    // enhancements); a second one could only have come from the data.
+    expect(page.match(/<script>/g)).toHaveLength(1);
     expect(page).toContain("&lt;script&gt;");
     expect(page).toContain("&quot;quoted&quot;");
     expect(page).toContain("a&amp;b");
     expect(page).toContain("&lt;1&gt;");
     expect(page).toContain("x&#39;y");
-    expect(page).toContain("&lt;sys&gt;");
+    // The system indicator has a fixed set of columns, so an unknown
+    // system is not rendered at all rather than rendered escaped.
+    expect(page).not.toContain("<sys>");
   });
 });
 
