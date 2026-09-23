@@ -110,6 +110,16 @@ back to `SYSTEMS`; `eval.yml` rejects them up front.
   `python314` vanished the day `buildbotPackages.python` aliased it (#49).
   The wrapper gives each top-level derivation a fresh attribute set so it is
   listed under its own name too.
+- **An alias that nixpkgs still uses internally aborts the eval.**
+  `packages-config.nix` turns aliases off, and a reference to a missing
+  attribute is an error `nix-env` can't skip. Upstream's own search eval
+  never gets that far: it keeps unfree packages disallowed, so the unfree
+  check throws first. We allow unfree, so the Linux evals failed from the
+  day `cudatoolkit` became an alias (nixpkgs#565306) while
+  `haskellPackages.cuda` and its siblings still read it. Look for
+  `error: attribute '…' missing` in the eval log, then add the name to
+  `shims` in `eval.nix`. The attribute is available during evaluation but
+  left out of the output.
 - **A Linux eval is ~575 MB of JSON**, past V8's 536 MB string cap. The
   importer stream-parses with `stream-json` (#13); don't `JSON.parse` it.
 - Darwin systems evaluate fine on Linux: this is pure evaluation, nothing
