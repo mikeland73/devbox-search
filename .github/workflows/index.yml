@@ -206,6 +206,9 @@ jobs:
           # endpoint: Neon's pooler is transaction-mode pgbouncer.
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
           NODE_OPTIONS: --max-old-space-size=6144
+          # import resolves each commit's date via the GitHub API; the
+          # unauthenticated limit is shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node packages/indexer/dist/cli.js import --dir evals
 
       - name: Summary
