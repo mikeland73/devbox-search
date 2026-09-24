@@ -354,6 +354,6 @@ by primary key; measured against production, 0.5–0.8 s for 50,000 names.
 
 ## Known trade-offs
 
-- **The home page costs what `/status` costs.** Both call `status()`, which is seven exact `count(*)`s; measured at ~1.3 s cold against production. It is cached for five minutes at the edge, the same as `/status.json`, so it is one query per five minutes rather than per visit. Approximate counts would be faster and less honest; if the home page ever needs to be quicker, the fix is a cheaper `status()`, shared by all three.
+- **The home page's numbers are exact, so it asks only for the ones it shows.** `status()` is seven exact `count(*)`s, and run together they compete for the same compute: ~1.2 s against production, most of it the `variants` count slowed by the others. The home page shows three counts, so it calls `homeStatus()`, which runs only those (packages, versions, commits) plus the newest commit and the `latest` table, in ~0.3 s. Approximate counts would be faster still and less honest.
 - **A stale JSON client calling `/search?q=` or `/pkg?name=` now gets HTML or a redirect instead of a 404.** Anything doing that has been broken since #80 removed the aliases; it now fails at the parse rather than the status code. The redirects mean a *person* following such a link lands on the right page.
 - **The releases table is the whole table.** python is 177 rows, and a few package sets are far longer. The filter input narrows it client-side; there is no pagination, because a version list is only useful whole.
