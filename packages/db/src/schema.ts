@@ -307,6 +307,21 @@ export const searchTerms = pgTable(
     // paths starting with the phrase.
     index("search_terms_name_lower_idx").on(sql`lower(${t.name})`),
     index("search_terms_attr_path_lower_idx").on(sql`lower(${t.attrPath})`),
+    // The prefix tier of phrase search takes the nearest name-prefix matches
+    // by trigram distance (`ORDER BY lower(name) <-> ...`), a KNN scan only
+    // GiST can do, separately for top-level and nested attributes. Partial
+    // on name = attr_path: the alias rows are ranked from the index below.
+    index("search_terms_top_level_name_knn_idx")
+      .using("gist", sql`lower(${t.name}) gist_trgm_ops`)
+      .where(sql`${t.name} = ${t.attrPath} AND ${t.topLevelAttr} IS NOT NULL`),
+    index("search_terms_nested_name_knn_idx")
+      .using("gist", sql`lower(${t.name}) gist_trgm_ops`)
+      .where(sql`${t.name} = ${t.attrPath} AND ${t.topLevelAttr} IS NULL`),
+    // The few hundred rows whose attr_path is not the package name (nix ->
+    // nixVersions.latest, …), which phrase search ranks in full.
+    index("search_terms_alias_idx")
+      .on(t.packageId)
+      .where(sql`${t.name} <> ${t.attrPath}`),
   ],
 );
 

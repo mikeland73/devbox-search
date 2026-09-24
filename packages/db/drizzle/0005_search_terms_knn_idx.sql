@@ -1,0 +1,3 @@
+CREATE INDEX "search_terms_top_level_name_knn_idx" ON "search_terms" USING gist (lower("name") gist_trgm_ops) WHERE "search_terms"."name" = "search_terms"."attr_path" AND "search_terms"."top_level_attr" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX "search_terms_nested_name_knn_idx" ON "search_terms" USING gist (lower("name") gist_trgm_ops) WHERE "search_terms"."name" = "search_terms"."attr_path" AND "search_terms"."top_level_attr" IS NULL;--> statement-breakpoint
+CREATE INDEX "search_terms_alias_idx" ON "search_terms" USING btree ("package_id") WHERE "search_terms"."name" <> "search_terms"."attr_path";
