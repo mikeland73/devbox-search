@@ -120,16 +120,20 @@ describe("renderStatusPage", () => {
   test("escapes everything it interpolates", () => {
     const hostile: Status = {
       ...healthy,
-      systems: [{ ...healthy.systems[0]!, system: "<script>", nix_version: '"quoted"' }],
+      systems: [{ ...healthy.systems[0]!, system: "<script>alert('x')</script>", nix_version: '"quoted"' }],
       latest_versions: [
         { name: "a&b", version: "<1>", attr_path: "x'y", systems: ["<sys>"], last_updated: new Date(0) },
       ],
     };
     const page = renderStatusPage(hostile, ORIGIN);
-    // The shell carries exactly one <script> (the progressive
-    // enhancements); a second one could only have come from the data.
-    expect(page.match(/<script>/g)).toHaveLength(1);
-    expect(page).toContain("&lt;script&gt;");
+    // The payload arrives escaped and no raw form of it survives. Asserted
+    // on the payload rather than by scanning for tags: a regexp for
+    // `<script>` would miss `<SCRIPT>` and claim more than it checked.
+    expect(page).toContain("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;");
+    expect(page).not.toContain("<script>alert");
+    // The shell carries exactly one script (the progressive enhancements);
+    // a second opener could only have come from the data.
+    expect(page.split("<script").length - 1).toBe(1);
     expect(page).toContain("&quot;quoted&quot;");
     expect(page).toContain("a&amp;b");
     expect(page).toContain("&lt;1&gt;");

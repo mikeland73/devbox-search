@@ -207,14 +207,19 @@ describe("package page", () => {
         homepage_url: "https://example.com/?a=1&b=2",
         releases: [release({ version: "<1>" })],
       }),
-      constraint: '"><script>',
+      constraint: '"><script>alert(2)</script>',
       resolved: null,
       now: NOW,
       origin: ORIGIN,
     });
-    expect(page.match(/<script>/g)).toHaveLength(1); // the shell's own
+    // Asserted on the payloads themselves, not by scanning for tags: a
+    // regexp for `<script>` would miss `<SCRIPT>` and claim more than it
+    // checked. The one script opener left is the shell's own.
+    expect(page).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(page).toContain("&lt;script&gt;alert(2)&lt;/script&gt;");
+    expect(page).not.toContain("<script>alert");
+    expect(page.split("<script").length - 1).toBe(1);
     expect(page).toContain("a&amp;b");
-    expect(page).toContain("&lt;script&gt;");
     expect(page).toContain("x&#39;y");
     expect(page).toContain("&lt;1&gt;");
     expect(page).toContain("&quot;&gt;&lt;script&gt;");
