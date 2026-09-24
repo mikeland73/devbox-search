@@ -526,3 +526,87 @@ test("GET /v2/pkg for an unknown package is a bare 404", async () => {
   // Go's handler wrote http.NotFound with an empty message here.
   assertError(await get(path), 404, "404 Not Found: ", path);
 });
+
+// ---------------------------------------------------------------------------
+// Website
+// ---------------------------------------------------------------------------
+// The pages render v2 responses, so what is checked here is that a deployment
+// serves them, that they agree with the JSON they were built from, and that
+// the paths freed by removing the unversioned aliases (#80) behave.
+
+test("GET / is the home page, with the index's own numbers", async () => {
+  const res = await get("/");
+  assert.equal(res.status, 200);
+  assert.match(res.contentType, /^text\/html/);
+  const status = okJson(await get("/status.json"), "/status.json");
+  assert.ok(res.text.includes(status.counts.packages.toLocaleString("en-US")), "home page shows the package count");
+  for (const l of status.latest_versions.slice(0, 5)) {
+    if (l.version !== null) assert.ok(res.text.includes(l.version), `home page shows ${l.name} ${l.version}`);
+  }
+});
+
+test("GET /pkg/{name} agrees with /v2/pkg", async () => {
+  const res = await get("/pkg/go");
+  assert.equal(res.status, 200);
+  assert.match(res.contentType, /^text\/html/);
+  const pkg = okJson(await get("/v2/pkg?name=go"), "/v2/pkg?name=go");
+  assert.ok(res.text.includes(pkg.releases[0].version), "page shows the newest release");
+  assert.ok(res.text.includes(GO_1_22.version), "page lists the frozen 1.22.12");
+  assert.ok(res.text.includes("devbox add go@"), "page offers a devbox command");
+});
+
+test("GET /pkg/{name}/{version} pins the version /v2/pkg reports", async () => {
+  const path = `/pkg/go/${GO_1_22.version}`;
+  const res = await get(path);
+  assert.equal(res.status, 200);
+  assert.ok(res.text.includes(`devbox add go@${GO_1_22.version}`), "page offers the pinned devbox command");
+  for (const [system, rev] of Object.entries(GO_1_22.revs)) {
+    assert.ok(res.text.includes(rev), `${path}: missing the ${system} rev ${rev}`);
+  }
+});
+
+test("GET /search?q= renders results, and a name@version jumps to the package", async () => {
+  const res = await get("/search?q=go");
+  assert.equal(res.status, 200);
+  assert.ok(res.text.includes('href="/pkg/go"'), "results link to the package page");
+
+  const jump = await get("/search?q=go%401.22");
+  assert.equal(jump.status, 302);
+  assert.equal(jump.headers.get("location"), "/pkg/go?v=1.22");
+});
+
+test("the paths the unversioned aliases used to own redirect to their pages", async () => {
+  const cases = [
+    ["/pkg?name=go", "/pkg/go"],
+    ["/resolve?name=go&version=1.22", "/pkg/go?v=1.22"],
+  ];
+  for (const [from, to] of cases) {
+    const res = await get(from);
+    assert.equal(res.status, 302, `${from}: ${res.status}`);
+    assert.equal(res.headers.get("location"), to, from);
+  }
+});
+
+test("an unknown package is a 404 page, not a plain-text error", async () => {
+  const res = await get("/pkg/definitely-not-a-package-xyz");
+  assert.equal(res.status, 404);
+  assert.match(res.contentType, /^text\/html/);
+});
+
+test("crawlers are allowed everything, and the sitemap covers every package", async () => {
+  const robots = await get("/robots.txt");
+  assert.equal(robots.status, 200);
+  assert.match(robots.text, /User-agent: \*/);
+  assert.ok(!robots.text.includes("Disallow"), "robots.txt disallows nothing");
+  assert.match(robots.text, /Sitemap: https?:\/\/[^\s]+\/sitemap\.xml/);
+
+  const index = await get("/sitemap.xml");
+  assert.equal(index.status, 200);
+  const pages = [...index.text.matchAll(/<loc>([^<]+)<\/loc>/g)].map((m) => m[1]);
+  const status = okJson(await get("/status.json"), "/status.json");
+  assert.equal(pages.length, Math.ceil(status.counts.packages / 50_000), "one sitemap per 50k packages");
+
+  const first = await get(new URL(pages[0]).pathname);
+  assert.equal(first.status, 200);
+  assert.ok(first.text.includes("/pkg/"), "sitemap lists package pages");
+});

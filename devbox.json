@@ -10,6 +10,7 @@
   "env": {
     "COREPACK_ENABLE_STRICT": "0"
   },
+  "env_from": ".env",
   "shell": {
     "init_hook": [
       "test -d node_modules || echo 'run `devbox run setup` to install and build'"
@@ -28,7 +29,13 @@
         "pnpm typecheck",
         "pnpm test"
       ],
-      "dev": "pnpm --filter @devbox-search/web dev",
+      "env:setup": "./tools/env-setup.sh",
+      "dev": [
+        "./tools/env-setup.sh",
+        "# .env was read before this script started, so a file env:setup just created is not in the environment yet:",
+        "if [ -f .env ]; then set -a; . ./.env; set +a; fi",
+        "pnpm --filter @devbox-search/web dev"
+      ],
       "migrate": [
         "pnpm --filter '@devbox-search/db...' build",
         "pnpm --filter @devbox-search/db migrate"

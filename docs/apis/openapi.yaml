@@ -655,7 +655,9 @@ components:
 
     V2SearchResult:
       type: object
-      required: [name, summary, last_updated]
+      description: |
+        One matching package, at the release `latest` resolves to.
+      required: [name, summary, last_updated, version, attribute_path, systems]
       properties:
         name:
           type: string
@@ -665,20 +667,39 @@ components:
           type: string
           format: date-time
           description: Commit date of the package's latest release.
+        version:
+          type: string
+          description: The latest non-prerelease version (what `?version=latest` would resolve to).
+        attribute_path:
+          type: string
+          description: The (alphabetically first) nixpkgs attribute path serving that version.
+        systems:
+          type: array
+          description: Systems that version exists on, sorted.
+          items:
+            type: string
 
     V2Pkg:
       type: object
-      required: [name, summary, homepage_url, license, releases]
+      required: [name, summary, description, homepage_url, license, attribute_paths, releases]
       properties:
         name:
           type: string
         summary:
           type: string
+        description:
+          type: string
+          description: Long description (`meta.longDescription`); empty when the package has none.
         homepage_url:
           type: string
         license:
           type: string
           description: SPDX identifier, or the license's short name when it has none.
+        attribute_paths:
+          type: array
+          description: Every attribute path that yields this package, across all versions and systems, sorted.
+          items:
+            type: string
         releases:
           type: array
           description: Newest version first.
@@ -687,7 +708,7 @@ components:
 
     V2Release:
       type: object
-      required: [version, last_updated, platforms, platforms_summary, outputs_summary]
+      required: [version, last_updated, platforms, platforms_summary, outputs_summary, prerelease, broken, insecure]
       properties:
         version:
           type: string
@@ -706,10 +727,22 @@ components:
         outputs_summary:
           type: string
           description: Display string such as `out, debug (Linux only)`; empty when every output is installed by default.
+        prerelease:
+          type: boolean
+          description: Whether the version is a prerelease (`3.14.0rc1`). `latest` never picks one.
+        broken:
+          type: boolean
+          description: |
+            Whether `meta.broken` is set on *every* platform in `platforms`. A
+            version still usable somewhere is not a broken release; the
+            per-platform flags say where.
+        insecure:
+          type: boolean
+          description: As `broken`, for `meta.insecure`.
 
     V2Platform:
       type: object
-      required: [arch, os, system, attribute_path, commit_hash, date, outputs]
+      required: [arch, os, system, attribute_path, commit_hash, date, outputs, broken, insecure]
       properties:
         arch:
           type: string
@@ -732,6 +765,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Output"
+        broken:
+          type: boolean
+          description: "`meta.broken` for this system."
+        insecure:
+          type: boolean
+          description: "`meta.insecure` for this system."
 
     # ------------------------------------------------------------------ v1
     V1PackageVersion:

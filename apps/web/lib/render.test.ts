@@ -34,6 +34,7 @@ function pkg(overrides: Partial<ResultPackage> = {}): ResultPackage {
     license: "PSF-2.0",
     broken: false,
     insecure: false,
+    prerelease: false,
     platforms: ["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux", "riscv64-linux"],
     outputs: [{ name: "out", path: "/nix/store/abc-python3-3.11.9", default: true }],
     ...overrides,
@@ -88,14 +89,13 @@ describe("renderV2Resolve", () => {
       pkg({ system: "aarch64-linux" }),
       // A second attribute path for the same system is ignored.
       pkg({ system: "aarch64-linux", attrPath: "python3" }),
-    ]) as Record<string, unknown>;
+    ]);
 
-    expect(rendered["name"]).toBe("python");
-    expect(rendered["version"]).toBe("3.11.9");
-    expect(rendered["summary"]).toBe("High-level dynamically-typed programming language");
-    const systems = rendered["systems"] as Record<string, unknown>;
-    expect(Object.keys(systems)).toEqual(["aarch64-darwin", "aarch64-linux"]);
-    expect(systems["aarch64-linux"]).toEqual({
+    expect(rendered.name).toBe("python");
+    expect(rendered.version).toBe("3.11.9");
+    expect(rendered.summary).toBe("High-level dynamically-typed programming language");
+    expect(Object.keys(rendered.systems)).toEqual(["aarch64-darwin", "aarch64-linux"]);
+    expect(rendered.systems["aarch64-linux"]).toEqual({
       flake_installable: {
         ref: { type: "github", owner: "NixOS", repo: "nixpkgs", rev: "a".repeat(40) },
         attr_path: "python311",
@@ -106,17 +106,15 @@ describe("renderV2Resolve", () => {
   });
 
   test("omits outputs when there are none (omitempty)", () => {
-    const rendered = renderV2Resolve([pkg({ outputs: [] })]) as Record<string, unknown>;
-    const system = (rendered["systems"] as Record<string, unknown>)["x86_64-linux"];
-    expect(system).not.toHaveProperty("outputs");
+    const rendered = renderV2Resolve([pkg({ outputs: [] })]);
+    expect(rendered.systems["x86_64-linux"]).not.toHaveProperty("outputs");
   });
 
   test("a non-default output omits the default key rather than emitting false", () => {
     const rendered = renderV2Resolve([
       pkg({ outputs: [{ name: "man", path: "/nix/store/x-man", default: false }] }),
-    ]) as Record<string, unknown>;
-    const system = (rendered["systems"] as Record<string, Record<string, unknown>>)["x86_64-linux"]!;
-    expect(system["outputs"]).toEqual([{ name: "man", path: "/nix/store/x-man" }]);
+    ]);
+    expect(rendered.systems["x86_64-linux"]!.outputs).toEqual([{ name: "man", path: "/nix/store/x-man" }]);
   });
 });
 
@@ -130,14 +128,32 @@ describe("renderV2Search", () => {
           name: "python",
           summary: "High-level dynamically-typed programming language",
           last_updated: "2024-03-08T13:51:52Z",
+          version: "3.11.9",
+          attribute_path: "python311",
+          systems: ["x86_64-linux"],
         },
         {
           name: "python3",
           summary: "High-level dynamically-typed programming language",
           last_updated: "2024-03-08T13:51:52Z",
+          version: "3.11.9",
+          attribute_path: "python311",
+          systems: ["x86_64-linux"],
         },
       ],
     });
+  });
+
+  test("reports every system of the release when the searcher aggregated them", () => {
+    const rendered = renderV2Search("python", [
+      pkg({ versionSystems: ["aarch64-darwin", "x86_64-linux"] }),
+    ]);
+    expect(rendered.results[0]!.systems).toEqual(["aarch64-darwin", "x86_64-linux"]);
+  });
+
+  test("falls back to the row's own system when no aggregate was selected", () => {
+    const rendered = renderV2Search("python", [pkg({ system: "aarch64-linux" })]);
+    expect(rendered.results[0]!.systems).toEqual(["aarch64-linux"]);
   });
 });
 
@@ -147,15 +163,15 @@ describe("renderV2Pkg", () => {
       pkg({ version: "3.11.9", system: "x86_64-linux" }),
       pkg({ version: "3.11.9", system: "aarch64-darwin" }),
       pkg({ version: "3.10.0", system: "x86_64-linux" }),
-    ]) as Record<string, unknown>;
+    ]);
 
-    expect(rendered["name"]).toBe("python");
-    expect(rendered["homepage_url"]).toBe("https://www.python.org");
-    const releases = rendered["releases"] as Array<Record<string, unknown>>;
+    expect(rendered.name).toBe("python");
+    expect(rendered.homepage_url).toBe("https://www.python.org");
+    const releases = rendered.releases;
     expect(releases).toHaveLength(2);
-    expect(releases[0]!["version"]).toBe("3.11.9");
-    const platforms = releases[0]!["platforms"] as Array<Record<string, unknown>>;
-    expect(platforms.map((p) => p["system"])).toEqual(["x86_64-linux", "aarch64-darwin"]);
+    expect(releases[0]!.version).toBe("3.11.9");
+    const platforms = releases[0]!.platforms;
+    expect(platforms.map((p) => p.system)).toEqual(["x86_64-linux", "aarch64-darwin"]);
     expect(platforms[0]).toMatchObject({ arch: "x86-64", os: "Linux" });
     expect(platforms[1]).toMatchObject({ arch: "arm64", os: "macOS" });
   });
@@ -164,9 +180,37 @@ describe("renderV2Pkg", () => {
     const rendered = renderV2Pkg([
       pkg({ system: "x86_64-linux", attrPath: "python311" }),
       pkg({ system: "x86_64-linux", attrPath: "python3" }),
-    ]) as Record<string, unknown>;
-    const releases = rendered["releases"] as Array<Record<string, unknown>>;
-    expect(releases[0]!["platforms"]).toHaveLength(1);
+    ]);
+    expect(rendered.releases[0]!.platforms).toHaveLength(1);
+  });
+
+  test("lists every attribute path the package is reachable by, sorted", () => {
+    const rendered = renderV2Pkg([
+      pkg({ version: "3.11.9", attrPath: "python311" }),
+      pkg({ version: "3.10.0", attrPath: "python3" }),
+      pkg({ version: "3.10.0", system: "aarch64-linux", attrPath: "python3" }),
+    ]);
+    expect(rendered.attribute_paths).toEqual(["python3", "python311"]);
+  });
+
+  test("a release is broken only when every platform it has is broken", () => {
+    const partly = renderV2Pkg([
+      pkg({ system: "x86_64-linux", broken: true }),
+      pkg({ system: "aarch64-linux", broken: false }),
+    ]);
+    expect(partly.releases[0]!.broken).toBe(false);
+    expect(partly.releases[0]!.platforms.map((p) => p.broken)).toEqual([true, false]);
+
+    const wholly = renderV2Pkg([
+      pkg({ system: "x86_64-linux", broken: true }),
+      pkg({ system: "aarch64-linux", broken: true }),
+    ]);
+    expect(wholly.releases[0]!.broken).toBe(true);
+  });
+
+  test("carries the version's prerelease flag onto the release", () => {
+    const rendered = renderV2Pkg([pkg({ version: "3.14.0rc1", prerelease: true })]);
+    expect(rendered.releases[0]!.prerelease).toBe(true);
   });
 });
 

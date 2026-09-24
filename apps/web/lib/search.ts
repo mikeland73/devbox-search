@@ -63,8 +63,17 @@ export interface ResultPackage {
   license: string;
   broken: boolean;
   insecure: boolean;
+  prerelease: boolean;
   platforms: string[];
   outputs: Array<{ name: string; path: string; default: boolean }>;
+  /**
+   * Every system this row's version exists on. Distinct from `platforms`,
+   * which is what the package *declares* (meta.platforms) rather than what
+   * was evaluated. Only the phrase searcher selects it: its DISTINCT ON
+   * collapses each package to a single row and would otherwise drop the
+   * other systems. Undefined elsewhere, where the caller has all the rows.
+   */
+  versionSystems?: string[];
 }
 
 /**
@@ -207,9 +216,21 @@ const resultColumns = {
   license: meta.license,
   broken: variants.broken,
   insecure: variants.insecure,
+  prerelease: versions.prerelease,
   platforms: meta.platforms,
   outputs: variants.outputs,
 } as const;
+
+/**
+ * The systems a version exists on, as one aggregate per row. Served by
+ * variants_identity_key (leading column version_id), so it is an index scan
+ * of the handful of rows that version has, not a table touch.
+ */
+const versionSystems = sql<string[]>`(
+  SELECT array_agg(DISTINCT s.system ORDER BY s.system)
+  FROM ${variants} s
+  WHERE s.version_id = ${variants.versionId}
+)`;
 
 /**
  * The base query: variants joined to their version, package, metadata, and
@@ -519,7 +540,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
     // Per package, the non-prerelease version pickLatestVersionId would
     // choose: the same ordering (latestOrder) over the package's variants.
     const rows = await db()
-      .selectDistinctOn([sql`hits.ord`], resultColumns)
+      .selectDistinctOn([sql`hits.ord`], { ...resultColumns, versionSystems })
       .from(hits)
       .innerJoin(
         sql`LATERAL (

@@ -109,10 +109,21 @@ export interface Route {
 }
 
 /**
+ * The route group holding the website — the HTML pages at /, /search,
+ * /pkg/... and their crawler files. openapi.yaml is the contract for the
+ * machine API, and a page is not part of it, so these are not documented
+ * there and {@link checkCoverage} does not ask them to be. (/status is:
+ * it is an ops endpoint that happens to render HTML, and it mirrors
+ * /status.json field for field.)
+ */
+export const SITE_GROUP = "(site)";
+
+/**
  * Every `route.ts` under the app directory, with the OpenAPI paths it
  * serves. An optional catch-all (`[[...name]]`) serves both the bare path
  * and the parameterized one; `[...name]` and `[name]` map to `{name}`.
- * Route groups (`(group)`) are not part of the URL.
+ * Route groups (`(group)`) are not part of the URL; {@link SITE_GROUP} is
+ * skipped entirely.
  */
 export function discoverRoutes(appDir: string = APP_DIR): Route[] {
   const routes: Route[] = [];
@@ -120,6 +131,7 @@ export function discoverRoutes(appDir: string = APP_DIR): Route[] {
     if (!entry.isFile() || entry.name !== "route.ts") continue;
     const file = join(entry.parentPath, entry.name);
     const fsRoute = relative(appDir, entry.parentPath).split(sep).join("/");
+    if (fsRoute.split("/").includes(SITE_GROUP)) continue;
     routes.push({ file, fsRoute, specPaths: fsRouteToSpecPaths(fsRoute) });
   }
   return routes.sort((a, b) => (a.fsRoute < b.fsRoute ? -1 : 1));

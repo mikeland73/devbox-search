@@ -1,13 +1,14 @@
 /**
- * GET /status — the numbers behind /status.json as a page a person can read:
- * overview tiles, per-system import state, the commit timeline, and what
- * `latest` resolves to for common packages. Same data, same cache policy;
- * see lib/statusPage.ts for the layout.
+ * GET / — the home page.
+ *
+ * Built from the same {@link status} the /status page and /status.json
+ * use, so the headline numbers and the `latest` table are the index's own
+ * report of itself, on the same five-minute cache.
  */
 
 import { handleGet, html, serverError } from "@/lib/http";
 import { STATUS_CACHE_CONTROL, status, type Status } from "@/lib/status";
-import { renderStatusPage } from "@/lib/site/statusPage";
+import { renderHomePage } from "@/lib/site/home";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,5 +20,5 @@ export const { GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE } = handleGet(async 
   } catch (err) {
     return serverError("error computing status", err);
   }
-  return html(renderStatusPage(body, new URL(request.url).origin), { cacheControl: STATUS_CACHE_CONTROL });
+  return html(renderHomePage(body, new URL(request.url).origin), { cacheControl: STATUS_CACHE_CONTROL });
 });
