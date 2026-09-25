@@ -55,7 +55,7 @@ afterEach(() => {
   useKnnMinPrefixRows(undefined);
 });
 
-const PHRASES = ["py", "PY", "pyth", "python", "python3", "python3Packages.", "python3Packages.a", "p", "nix", "pyramid", "pyNix", "zzz", "-"];
+const PHRASES = ["py", "PY", "pyth", "python", "python3", "python3Packages.", "python3Packages.a", "p", "nix", "pyramid", "pyNix", "py3", "zzz", "-"];
 
 const shape = (rows: ResultPackage[]) => rows.map((r) => [r.name, r.version, r.attrPath, r.system]);
 
