@@ -431,6 +431,22 @@ function semverBounds(constraint: Constraint): SQL {
 const PHRASE_LIMIT = 50;
 
 /**
+ * How many names a phrase must be a prefix of before phrase search ranks
+ * its nearest matches by trigram distance rather than scoring them all.
+ */
+const KNN_MIN_PREFIX_ROWS = 10_000;
+
+let knnMinPrefixRows = KNN_MIN_PREFIX_ROWS;
+
+/**
+ * Test seam: move the KNN threshold (undefined restores the default), so a
+ * small fixture can drive both ways of ranking a broad phrase.
+ */
+export function useKnnMinPrefixRows(n: number | undefined): void {
+  knnMinPrefixRows = n ?? KNN_MIN_PREFIX_ROWS;
+}
+
+/**
  * Full-text search over names and attribute paths.
  *
  * Replaces FTS5 bm25 (with its 10x top-level-attr weighting) with tiered
@@ -484,22 +500,107 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   // GIN trigram index is lossy, so every candidate is rechecked with
   // similarity(), and a broad prefix like "python" has 70k candidates
   // (every pythonXYPackages.* attribute) — 1.1 s of CPU when the two tiers
-  // were one OR'd WHERE clause. The prefix tier itself is a BitmapOr of the
-  // two lower() btrees. See docs/query-plans.md.
+  // were one OR'd WHERE clause. See docs/query-plans.md.
   const prefixMatch = sql`(
     lower(search_terms.name) LIKE ${prefix} ESCAPE '\\'
     OR lower(search_terms.attr_path) LIKE ${prefix} ESCAPE '\\'
   )`;
-  const tier = (where: SQL) => sql`
-    SELECT search_terms.package_id, search_terms.name, ${rank} AS rank
+
+  // A broad phrase ranks candidates, not every prefix match.
+  //
+  // Scoring every prefix match was the cost of a broad phrase: "python" is a
+  // prefix of 70k rows, and similarity() over all of them was ~0.4 s of the
+  // query. But within one class of rows the rank is a constant plus
+  // 100 * similarity, so the best PHRASE_LIMIT of a class are its nearest
+  // PHRASE_LIMIT by trigram distance, which a GiST index returns in order
+  // (`<->`, a KNN scan) without scoring the rest. The candidates are:
+  //
+  //   - exact matches of either column (a handful of rows);
+  //   - every alias row, name <> attr_path (under 600 in the whole table,
+  //     and the only rows where the rank's greatest() of two similarities
+  //     can exceed the name's, or where only the attr_path is a prefix);
+  //   - for the rest (name = attr_path), the PHRASE_LIMIT nearest
+  //     name-prefix matches among top-level attributes, and the same among
+  //     nested ones, since the top-level bonus is outside the distance.
+  //
+  // That ranks exactly as scoring every row would. A row left out has
+  // PHRASE_LIMIT rows of its own class ahead of it by (distance, name),
+  // i.e. by (rank, name); a package has at most one name = attr_path row,
+  // so they are PHRASE_LIMIT other packages that all outrank it. And when a
+  // class has fewer rows than that, all of them are candidates, so the
+  // fuzzy tier's "is the prefix tier full" test is unchanged. The arms are
+  // UNION ALL: a row in two of them scores the same twice, and the tier
+  // keeps the max per package anyway.
+  //
+  // The KNN indexes are on lower(name), so that the prefix LIKE is an index
+  // condition of the same scan; similarity() folds case itself, so the
+  // distance order is the same as on name. Even so, a class smaller than
+  // PHRASE_LIMIT never fills the LIMIT, and the scan visits every row with
+  // a *word* starting with the phrase ("go" -> python3Packages.google-auth):
+  // ~12 ms, where scoring the 450 names starting with "go" takes 1.5. So
+  // the KNN arms only run for a phrase that is a prefix of at least
+  // KNN_MIN_PREFIX_ROWS names (counted with a LIMIT, an index-only scan),
+  // and a narrower one scores every prefix match as before. Measured on
+  // production data the two cross over between 7k and 12k rows. The outcome is the
+  // same either way; only the time differs.
+  //
+  // A phrase with no letters or digits ("-") has no trigrams: every row is
+  // at the same distance, and a KNN scan would walk the whole index to
+  // order them by name. Those phrases always score every prefix match.
+  //
+  // The planner only takes the KNN scan when it expects more than
+  // PHRASE_LIMIT matches; otherwise it sorts them all by distance, which is
+  // no faster than scoring them. So the class filters are spelled
+  // `(name = attr_path) IS TRUE / IS FALSE`, the form that its expression
+  // statistics (migration 0005) estimate. A bare `name = attr_path` is
+  // guessed at 0.5% of rows rather than 99.8%, which put phrases with ~10k
+  // matches (python313Packages.) on the sorting side. The indexes'
+  // predicates are spelled the same way, so these arms match them.
+  const candidateColumns = sql`search_terms.package_id, search_terms.name, search_terms.attr_path, search_terms.top_level_attr`;
+  const broad = sql`(SELECT broad FROM breadth)`;
+  const nearestPrefixMatches = (topLevel: SQL) => sql`(
+    SELECT ${candidateColumns}
     FROM search_terms
-    WHERE ${where}
+    WHERE ${broad} AND (search_terms.name = search_terms.attr_path) IS TRUE AND ${topLevel}
+      AND lower(search_terms.name) LIKE ${prefix} ESCAPE '\\'
+    ORDER BY lower(search_terms.name) <-> lower(${phrase}), search_terms.name
+    LIMIT ${PHRASE_LIMIT})`;
+  const knn = /[\p{L}\p{N}]/u.test(phrase);
+  const breadth = sql`breadth AS (
+    SELECT count(*) >= ${knnMinPrefixRows} AS broad
+    FROM (
+      SELECT 1 FROM search_terms
+      WHERE lower(search_terms.name) LIKE ${prefix} ESCAPE '\\'
+      LIMIT ${knnMinPrefixRows}
+    ) AS probe
+  ),`;
+  const prefixRows = knn
+    ? sql`(
+        SELECT ${candidateColumns}
+        FROM search_terms
+        WHERE NOT ${broad} AND ${prefixMatch}
+        UNION ALL
+        SELECT ${candidateColumns}
+        FROM search_terms
+        WHERE ${broad} AND (lower(search_terms.name) = lower(${phrase}) OR lower(search_terms.attr_path) = lower(${phrase}))
+        UNION ALL
+        SELECT ${candidateColumns}
+        FROM search_terms
+        WHERE ${broad} AND (search_terms.name = search_terms.attr_path) IS FALSE AND ${prefixMatch}
+        UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NOT NULL`)}
+        UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NULL`)}
+      ) AS search_terms`
+    : sql`search_terms WHERE ${prefixMatch}`;
+  const tier = (rows: SQL) => sql`
+    SELECT search_terms.package_id, search_terms.name, ${rank} AS rank
+    FROM ${rows}
     GROUP BY search_terms.package_id, search_terms.name
     ORDER BY rank DESC, search_terms.name
     LIMIT ${PHRASE_LIMIT}`;
   const result = await db().execute(sql`
-    WITH prefix AS (${tier(prefixMatch)}),
-    fuzzy AS (${tier(sql`
+    WITH ${knn ? breadth : sql``}
+    prefix AS (${tier(prefixRows)}),
+    fuzzy AS (${tier(sql`search_terms WHERE
       (SELECT count(*) FROM prefix) < ${PHRASE_LIMIT}
       AND (search_terms.name % ${phrase} OR search_terms.attr_path % ${phrase})
       AND NOT ${prefixMatch}`)})

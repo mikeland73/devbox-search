@@ -19,7 +19,7 @@
 
 import pg from "pg";
 
-const PHRASES = ["go", "python", "hello"];
+const PHRASES = ["go", "python", "python313Packages.", "hello", "-"];
 const NAMES = ["go", "python", "python311", "hello"];
 
 /** The tiered rank expression shared by both candidate tiers. */
@@ -41,21 +41,64 @@ const RANK = `max(
 const PREFIX_MATCH = `(lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
    OR lower(search_terms.attr_path) LIKE lower($2) || '%' ESCAPE '\\')`;
 
-const tier = (where) => `
+const tier = (rows) => `
   SELECT search_terms.package_id, search_terms.name, ${RANK} AS rank
-  FROM search_terms
-  WHERE ${where}
+  FROM ${rows}
   GROUP BY search_terms.package_id, search_terms.name
   ORDER BY rank DESC, search_terms.name
   LIMIT 50`;
 
+/** KNN_MIN_PREFIX_ROWS in search.ts. */
+const KNN_MIN_PREFIX_ROWS = 10000;
+
+const CANDIDATE_COLUMNS = `search_terms.package_id, search_terms.name, search_terms.attr_path, search_terms.top_level_attr`;
+
+/** One class's PHRASE_LIMIT nearest name-prefix matches, by trigram distance. */
+const nearest = (topLevel) => `(
+  SELECT ${CANDIDATE_COLUMNS}
+  FROM search_terms
+  WHERE (SELECT broad FROM breadth) AND (search_terms.name = search_terms.attr_path) IS TRUE AND ${topLevel}
+    AND lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
+  ORDER BY lower(search_terms.name) <-> lower($1), search_terms.name
+  LIMIT 50)`;
+
+/**
+ * The prefix tier's rows for a phrase with letters or digits: every prefix
+ * match when the phrase is narrow, the nearest matches per class when it is
+ * broad (see searchByPhrase).
+ */
+const PREFIX_ROWS = `(
+  SELECT ${CANDIDATE_COLUMNS} FROM search_terms
+  WHERE NOT (SELECT broad FROM breadth) AND ${PREFIX_MATCH}
+  UNION ALL
+  SELECT ${CANDIDATE_COLUMNS} FROM search_terms
+  WHERE (SELECT broad FROM breadth)
+    AND (lower(search_terms.name) = lower($1) OR lower(search_terms.attr_path) = lower($1))
+  UNION ALL
+  SELECT ${CANDIDATE_COLUMNS} FROM search_terms
+  WHERE (SELECT broad FROM breadth) AND (search_terms.name = search_terms.attr_path) IS FALSE AND ${PREFIX_MATCH}
+  UNION ALL ${nearest("search_terms.top_level_attr IS NOT NULL")}
+  UNION ALL ${nearest("search_terms.top_level_attr IS NULL")}
+) AS search_terms`;
+
+const BREADTH = `breadth AS (
+  SELECT count(*) >= ${KNN_MIN_PREFIX_ROWS} AS broad
+  FROM (
+    SELECT 1 FROM search_terms
+    WHERE lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
+    LIMIT ${KNN_MIN_PREFIX_ROWS}
+  ) AS probe
+),`;
+
 /**
  * searchByPhrase, ranking: the prefix tier, then — only if it is not already
- * full — the trigram-similarity tier.
+ * full — the trigram-similarity tier. A phrase with no letters or digits
+ * has no trigrams and always scores every prefix match.
  */
-const RANKED = `
-WITH prefix AS (${tier(PREFIX_MATCH)}),
-fuzzy AS (${tier(`(SELECT count(*) FROM prefix) < 50
+const ranked = (knn) => `
+WITH ${knn ? BREADTH : ""}
+prefix AS (${tier(knn ? PREFIX_ROWS : `search_terms WHERE ${PREFIX_MATCH}`)}),
+fuzzy AS (${tier(`search_terms WHERE (SELECT count(*) FROM prefix) < 50
     AND (search_terms.name % $1 OR search_terms.attr_path % $1)
     AND NOT ${PREFIX_MATCH}`)})
 SELECT package_id
@@ -188,22 +231,32 @@ print("- **Latest** (pick latest version, batched fetch latest) sorts one packag
 print("  rows with a `SubPlan` per row on `variant_ranges_pkey` (#44). A few hundred index");
 print("  probes; a `Seq Scan on variant_ranges` would mean the presence subquery lost its");
 print("  `variant_id =` correlation.");
-print("- **Ranked terms** is two tiers. The `prefix` CTE's filter must be the two `LIKE`s");
-print("  only — a `BitmapOr` of `search_terms_name_lower_idx` and `search_terms_attr_path_lower_idx`");
-print("  for narrow phrases (`go`), a plain seq scan when a quarter of the table matches");
-print("  (`python`, ~90 ms). The `fuzzy` arm must sit under a `One-Time Filter` and show");
-print("  `(never executed)` whenever the prefix tier is full (`go`, `python`); it runs for");
-print("  `hello`. A `%` in the prefix arm's filter, or a fuzzy arm that ran for `python`, is a");
-print("  regression: `%` is cheap to index but every GIN candidate is rechecked with");
-print("  similarity(), and `python` has 70k of them (every `pythonXYPackages.*` attribute is");
-print("  a name-prefix match) — ~1.1 s of CPU when both tiers were one OR'd WHERE. What");
-print("  remains for broad prefixes is similarity() over the prefix rows themselves (~0.4 s");
-print("  for `python`); making that cheaper means changing how that tier is ranked, not the plan.");
+print("- **Ranked terms** is two tiers. The `breadth` probe is an index scan of");
+print("  `search_terms_name_lower_idx` stopped by its LIMIT, and it gates the `prefix` arms with");
+print("  `One-Time Filter`s. For a narrow phrase (`go`, `hello`) only the first arm runs: a");
+print("  `BitmapOr` of `search_terms_name_lower_idx` and `search_terms_attr_path_lower_idx`. For a");
+print("  broad one (`python`) that arm shows `(never executed)`, the alias arm scans");
+print("  `search_terms_alias_idx` (a few hundred rows), and the two nearest-match arms are");
+print("  `Index Scan`s of `search_terms_top_level_name_knn_idx` / `search_terms_nested_name_knn_idx`");
+print("  ordered by `<->` under an `Incremental Sort` and a `Limit` of 50. A seq scan or a");
+print("  full-arm `Sort` of tens of thousands of rows here is the old cost coming back:");
+print("  similarity() over every prefix match was ~0.4 s for `python`, 70k rows. Check");
+print("  `python313Packages.` too: at 12k matches it is just over the probe's threshold, and a");
+print("  `Bitmap Heap Scan` + `top-N heapsort` in its nested arm means the planner expects fewer");
+print("  than 50 rows there — `search_terms_same_name_stats` is missing or was never analyzed");
+print("  (`(name = attr_path) IS TRUE` should estimate ~99.8% of the table). `-` has no");
+print("  trigrams and takes the scoring path with no probe. The `fuzzy` arm must sit under a");
+print("  `One-Time Filter` and show `(never executed)` whenever the prefix tier is full (`go`,");
+print("  `python`); it runs for `hello` and `-`. A `%` in the prefix arms, or a fuzzy arm that");
+print("  ran for `python`, is a regression: `%` is cheap to index but every GIN candidate is");
+print("  rechecked with similarity() — ~1.1 s of CPU for `python` when both tiers were one");
+print("  OR'd WHERE.");
 print();
 
 print("## Phrase search (/v2/search, /v1/search)");
 print();
 for (const phrase of PHRASES) {
+  const RANKED = ranked(/[\p{L}\p{N}]/u.test(phrase));
   await explain(`ranked terms — q=${phrase}`, RANKED, [phrase, escapeLike(phrase)]);
   const { rows: hits } = await client.query(RANKED, [phrase, escapeLike(phrase)]);
   const ids = hits.map((h) => h.package_id).join(",");
