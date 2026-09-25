@@ -9,6 +9,7 @@
  * Keys are lowercase phrases, values the package names or attribute paths
  * they mean (matched case-insensitively). A word that is itself a package
  * name ("aws", "tf", "ag") is left out: searching for it should find it.
+ * Every key must contain a letter or digit, or searchByPhrase ignores it.
  */
 const PHRASE_ALIASES: ReadonlyMap<string, readonly string[]> = new Map(
   Object.entries({

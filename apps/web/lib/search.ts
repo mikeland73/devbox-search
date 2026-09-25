@@ -463,14 +463,16 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const prefix = sql`lower(${escapeLike(phrase)}) || '%'`;
 
   // The packages the phrase is a common word for ("node" -> nodejs), by name
-  // or attribute path. They score above an exact match, and are candidates
-  // of the prefix tier whatever their spelling, since "golang" is neither a
-  // prefix of nor similar to "go". A phrase without aliases (nearly every
-  // one) runs the same SQL as if this did not exist.
+  // or attribute path. They outscore anything else (at most 1000 + 100 + 25,
+  // an exact top-level match), even as a nested attribute with no trigram in
+  // common with the phrase ("k8s" -> kubectl), and are candidates of the
+  // prefix tier whatever their spelling, since "golang" is neither a prefix
+  // of nor similar to "go". A phrase without aliases (nearly every one) runs
+  // the same SQL as if this did not exist.
   const aliases = phraseAliases(phrase);
   const aliasList = sql.join(aliases.map((a) => sql`lower(${a})`), sql`, `);
   const aliasRank = aliases.length > 0
-    ? sql`WHEN lower(search_terms.name) IN (${aliasList}) OR lower(search_terms.attr_path) IN (${aliasList}) THEN 1100`
+    ? sql`WHEN lower(search_terms.name) IN (${aliasList}) OR lower(search_terms.attr_path) IN (${aliasList}) THEN 2000`
     : sql``;
 
   // The tiered score, selected as `rank` and ordered by that alias so the
@@ -573,6 +575,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   // predicates are spelled the same way, so these arms match them.
   const candidateColumns = sql`search_terms.package_id, search_terms.name, search_terms.attr_path, search_terms.top_level_attr`;
   // One arm per column, so each is a walk of that column's lower() index.
+  // Only the KNN branch below takes them: every alias has a letter or digit.
   const aliasRows = aliases.length > 0
     ? sql`
         UNION ALL
@@ -614,9 +617,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
         UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NULL`)}
         ${aliasRows}
       ) AS search_terms`
-    : aliases.length > 0
-      ? sql`(SELECT ${candidateColumns} FROM search_terms WHERE ${prefixMatch} ${aliasRows}) AS search_terms`
-      : sql`search_terms WHERE ${prefixMatch}`;
+    : sql`search_terms WHERE ${prefixMatch}`;
   const tier = (rows: SQL) => sql`
     SELECT search_terms.package_id, search_terms.name, ${rank} AS rank
     FROM ${rows}

@@ -80,6 +80,17 @@ describe("searchByPhrase ranking", () => {
     expect(uniqueNames(latest)).toEqual(["python", "py3c"]);
   });
 
+  test("an alias outranks an exact match even as a dissimilar nested attribute", async () => {
+    // "k8s" shares no trigram with kubectl, and a nested attribute gets no
+    // top-level bonus, so only the alias score can put it ahead of a
+    // top-level package named exactly "k8s".
+    await seedPackage(t.db, { name: "k8s", versions: [{ version: "1.0.0" }] });
+    await seedPackage(t.db, { name: "kubectl", versions: [{ version: "1.31.0", attrPath: "pkgs.kubectl" }] });
+
+    const latest = await search({ phrase: "k8s", version: "latest" });
+    expect(uniqueNames(latest)).toEqual(["kubectl", "k8s"]);
+  });
+
   test("an alias for a package that is not there changes nothing", async () => {
     await seedPackage(t.db, { name: "node-gyp", versions: [{ version: "10.0.0" }] });
 
