@@ -12,6 +12,20 @@ import { ago, esc, integer, systemCells, systemHeaders } from "./format";
 import { commitLink, page } from "./layout";
 import { pkgPath, searchPath } from "./links";
 
+/**
+ * Five minutes fresh, like /status.json, but a day of stale-while-revalidate
+ * rather than ten minutes.
+ *
+ * With the status policy, a home page nobody had asked for in fifteen
+ * minutes was a full miss, and a miss is the slowest render the site has
+ * (the status counts). The numbers only move when the indexer imports a
+ * commit, a few times a day, so a visitor after a quiet spell is better
+ * served the previous render at once while the edge refreshes it. /status
+ * keeps the short window: it exists to catch a stalled import, and a day
+ * of staleness would hide one.
+ */
+export const HOME_CACHE_CONTROL = "public, s-maxage=300, stale-while-revalidate=86400";
+
 const EXAMPLES = ["python", "go@^1.22", "nodejs@20", "ripgrep", "nodePackages.typescript"];
 
 export function renderHomePage(s: Status, origin: string): string {

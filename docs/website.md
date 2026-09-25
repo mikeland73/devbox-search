@@ -154,7 +154,7 @@ One search box, the numbers that make the site credible, and examples
 that teach the query syntax by clicking:
 
 - Search box, autofocused, placeholder `python, go@1.22, nodePackages.typescript`.
-- Headline: `250,968 packages · 1,469,255 versions · 2,799 nixpkgs-unstable commits · updated 2 hours ago`, from `/status.json` (same 5-minute cache).
+- Headline: `250,968 packages · 1,469,255 versions · 2,799 nixpkgs-unstable commits · updated 2 hours ago`, the numbers `/status.json` reports (fresh for the same five minutes, then served stale for up to a day while the edge refreshes).
 - Example chips: `python` · `go@^1.22` · `nodejs@20` · `ripgrep` · `nodePackages.typescript`.
 - One paragraph on what the index is (every commit of nixpkgs-unstable, incremental, never rebuilt) with links to the API reference, `/status`, and the repo.
 - The `COMMON_PACKAGES` table from `/status` ("what `latest` resolves to today") is a good home-page section too — it is the fastest way to show what the site is for — but it stays on `/status` until the home page has real usage data.
@@ -357,3 +357,4 @@ by primary key; measured against production, 0.5–0.8 s for 50,000 names.
 - **The home page costs what `/status` costs.** Both call `status()`, which is seven exact `count(*)`s; measured at ~1.3 s cold against production. It is cached for five minutes at the edge, the same as `/status.json`, so it is one query per five minutes rather than per visit. Approximate counts would be faster and less honest; if the home page ever needs to be quicker, the fix is a cheaper `status()`, shared by all three.
 - **A stale JSON client calling `/search?q=` or `/pkg?name=` now gets HTML or a redirect instead of a 404.** Anything doing that has been broken since #80 removed the aliases; it now fails at the parse rather than the status code. The redirects mean a *person* following such a link lands on the right page.
 - **The releases table is the whole table.** python is 177 rows, and a few package sets are far longer. The filter input narrows it client-side; there is no pagination, because a version list is only useful whole.
+- **The home page can be a day stale.** It is fresh for five minutes, like `/status.json`, but has a day of `stale-while-revalidate` rather than ten minutes, so a visitor after a quiet spell gets the previous render instantly instead of waiting for the counts. The first visitor after the quiet spell sees numbers (and an "updated … ago") as of that render; the edge refreshes it in the background for the next one. `/status` keeps the short window because it is where a stalled import should show.

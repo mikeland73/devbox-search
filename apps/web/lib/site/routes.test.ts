@@ -7,6 +7,8 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createTestDb, seedCommits, seedPackage, type TestDb } from "../testDb";
+import { STATUS_CACHE_CONTROL } from "../status";
+import { HOME_CACHE_CONTROL } from "./home";
 
 import * as home from "@/app/(site)/route";
 import * as searchPage from "@/app/(site)/search/route";
@@ -54,6 +56,13 @@ describe("/", () => {
     const body = await res.text();
     expect(body).toContain("Every version of every nixpkgs package");
     expect(body).toContain("nixpkgs-unstable commits");
+  });
+
+  test("is served stale for a day, unlike /status", async () => {
+    const res = await get(home, "/");
+    expect(res.headers.get("cache-control")).toBe(HOME_CACHE_CONTROL);
+    expect(HOME_CACHE_CONTROL).toContain("stale-while-revalidate=86400");
+    expect(HOME_CACHE_CONTROL).not.toBe(STATUS_CACHE_CONTROL);
   });
 });
 
