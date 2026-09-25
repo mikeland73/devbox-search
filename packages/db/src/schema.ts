@@ -311,17 +311,24 @@ export const searchTerms = pgTable(
     // by trigram distance (`ORDER BY lower(name) <-> ...`), a KNN scan only
     // GiST can do, separately for top-level and nested attributes. Partial
     // on name = attr_path: the alias rows are ranked from the index below.
+    //
+    // The predicates are spelled `(name = attr_path) IS TRUE / IS FALSE` so
+    // that the planner estimates them from the expression statistics that
+    // migration 0005 creates (drizzle doesn't model CREATE STATISTICS). A
+    // bare `name = attr_path` compares two columns, which Postgres guesses
+    // at 0.5% of rows; it is 99.8%, and the underestimate made the planner
+    // drop the KNN scan for phrases with around 10k matches.
     index("search_terms_top_level_name_knn_idx")
       .using("gist", sql`lower(${t.name}) gist_trgm_ops`)
-      .where(sql`${t.name} = ${t.attrPath} AND ${t.topLevelAttr} IS NOT NULL`),
+      .where(sql`(${t.name} = ${t.attrPath}) IS TRUE AND ${t.topLevelAttr} IS NOT NULL`),
     index("search_terms_nested_name_knn_idx")
       .using("gist", sql`lower(${t.name}) gist_trgm_ops`)
-      .where(sql`${t.name} = ${t.attrPath} AND ${t.topLevelAttr} IS NULL`),
+      .where(sql`(${t.name} = ${t.attrPath}) IS TRUE AND ${t.topLevelAttr} IS NULL`),
     // The few hundred rows whose attr_path is not the package name (nix ->
     // nixVersions.latest, …), which phrase search ranks in full.
     index("search_terms_alias_idx")
       .on(t.packageId)
-      .where(sql`${t.name} <> ${t.attrPath}`),
+      .where(sql`(${t.name} = ${t.attrPath}) IS FALSE`),
   ],
 );
 

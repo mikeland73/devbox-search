@@ -418,7 +418,7 @@
             }
           ],
           "isUnique": false,
-          "where": "\"search_terms\".\"name\" = \"search_terms\".\"attr_path\" AND \"search_terms\".\"top_level_attr\" IS NOT NULL",
+          "where": "(\"search_terms\".\"name\" = \"search_terms\".\"attr_path\") IS TRUE AND \"search_terms\".\"top_level_attr\" IS NOT NULL",
           "concurrently": false,
           "method": "gist",
           "with": {}
@@ -434,7 +434,7 @@
             }
           ],
           "isUnique": false,
-          "where": "\"search_terms\".\"name\" = \"search_terms\".\"attr_path\" AND \"search_terms\".\"top_level_attr\" IS NULL",
+          "where": "(\"search_terms\".\"name\" = \"search_terms\".\"attr_path\") IS TRUE AND \"search_terms\".\"top_level_attr\" IS NULL",
           "concurrently": false,
           "method": "gist",
           "with": {}
@@ -450,7 +450,7 @@
             }
           ],
           "isUnique": false,
-          "where": "\"search_terms\".\"name\" <> \"search_terms\".\"attr_path\"",
+          "where": "(\"search_terms\".\"name\" = \"search_terms\".\"attr_path\") IS FALSE",
           "concurrently": false,
           "method": "btree",
           "with": {}

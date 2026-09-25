@@ -19,7 +19,7 @@
 
 import pg from "pg";
 
-const PHRASES = ["go", "python", "hello", "-"];
+const PHRASES = ["go", "python", "python313Packages.", "hello", "-"];
 const NAMES = ["go", "python", "python311", "hello"];
 
 /** The tiered rank expression shared by both candidate tiers. */
@@ -57,7 +57,7 @@ const CANDIDATE_COLUMNS = `search_terms.package_id, search_terms.name, search_te
 const nearest = (topLevel) => `(
   SELECT ${CANDIDATE_COLUMNS}
   FROM search_terms
-  WHERE (SELECT broad FROM breadth) AND search_terms.name = search_terms.attr_path AND ${topLevel}
+  WHERE (SELECT broad FROM breadth) AND (search_terms.name = search_terms.attr_path) IS TRUE AND ${topLevel}
     AND lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
   ORDER BY lower(search_terms.name) <-> lower($1), search_terms.name
   LIMIT 50)`;
@@ -76,7 +76,7 @@ const PREFIX_ROWS = `(
     AND (lower(search_terms.name) = lower($1) OR lower(search_terms.attr_path) = lower($1))
   UNION ALL
   SELECT ${CANDIDATE_COLUMNS} FROM search_terms
-  WHERE (SELECT broad FROM breadth) AND search_terms.name <> search_terms.attr_path AND ${PREFIX_MATCH}
+  WHERE (SELECT broad FROM breadth) AND (search_terms.name = search_terms.attr_path) IS FALSE AND ${PREFIX_MATCH}
   UNION ALL ${nearest("search_terms.top_level_attr IS NOT NULL")}
   UNION ALL ${nearest("search_terms.top_level_attr IS NULL")}
 ) AS search_terms`;
@@ -240,7 +240,11 @@ print("  `search_terms_alias_idx` (a few hundred rows), and the two nearest-matc
 print("  `Index Scan`s of `search_terms_top_level_name_knn_idx` / `search_terms_nested_name_knn_idx`");
 print("  ordered by `<->` under an `Incremental Sort` and a `Limit` of 50. A seq scan or a");
 print("  full-arm `Sort` of tens of thousands of rows here is the old cost coming back:");
-print("  similarity() over every prefix match was ~0.4 s for `python`, 70k rows. `-` has no");
+print("  similarity() over every prefix match was ~0.4 s for `python`, 70k rows. Check");
+print("  `python313Packages.` too: at 12k matches it is just over the probe's threshold, and a");
+print("  `Bitmap Heap Scan` + `top-N heapsort` in its nested arm means the planner expects fewer");
+print("  than 50 rows there — `search_terms_same_name_stats` is missing or was never analyzed");
+print("  (`(name = attr_path) IS TRUE` should estimate ~99.8% of the table). `-` has no");
 print("  trigrams and takes the scoring path with no probe. The `fuzzy` arm must sit under a");
 print("  `One-Time Filter` and show `(never executed)` whenever the prefix tier is full (`go`,");
 print("  `python`); it runs for `hello` and `-`. A `%` in the prefix arms, or a fuzzy arm that");

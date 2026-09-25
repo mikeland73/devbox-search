@@ -547,12 +547,21 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   // A phrase with no letters or digits ("-") has no trigrams: every row is
   // at the same distance, and a KNN scan would walk the whole index to
   // order them by name. Those phrases always score every prefix match.
+  //
+  // The planner only takes the KNN scan when it expects more than
+  // PHRASE_LIMIT matches; otherwise it sorts them all by distance, which is
+  // no faster than scoring them. So the class filters are spelled
+  // `(name = attr_path) IS TRUE / IS FALSE`, the form that its expression
+  // statistics (migration 0005) estimate. A bare `name = attr_path` is
+  // guessed at 0.5% of rows rather than 99.8%, which put phrases with ~10k
+  // matches (python313Packages.) on the sorting side. The indexes'
+  // predicates are spelled the same way, so these arms match them.
   const candidateColumns = sql`search_terms.package_id, search_terms.name, search_terms.attr_path, search_terms.top_level_attr`;
   const broad = sql`(SELECT broad FROM breadth)`;
   const nearestPrefixMatches = (topLevel: SQL) => sql`(
     SELECT ${candidateColumns}
     FROM search_terms
-    WHERE ${broad} AND search_terms.name = search_terms.attr_path AND ${topLevel}
+    WHERE ${broad} AND (search_terms.name = search_terms.attr_path) IS TRUE AND ${topLevel}
       AND lower(search_terms.name) LIKE ${prefix} ESCAPE '\\'
     ORDER BY lower(search_terms.name) <-> lower(${phrase}), search_terms.name
     LIMIT ${PHRASE_LIMIT})`;
@@ -577,7 +586,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
         UNION ALL
         SELECT ${candidateColumns}
         FROM search_terms
-        WHERE ${broad} AND search_terms.name <> search_terms.attr_path AND ${prefixMatch}
+        WHERE ${broad} AND (search_terms.name = search_terms.attr_path) IS FALSE AND ${prefixMatch}
         UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NOT NULL`)}
         UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NULL`)}
       ) AS search_terms`
