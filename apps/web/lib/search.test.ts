@@ -53,6 +53,51 @@ describe("searchByPhrase ranking", () => {
     expect(uniqueNames(latest)).toEqual(["go-a", "go-b", "go-c"]);
   });
 
+  test("a common word for a package ranks it first", async () => {
+    await seedPackage(t.db, { name: "node-red", versions: [{ version: "4.0.0" }] });
+    await seedPackage(t.db, { name: "node-gyp", versions: [{ version: "10.0.0" }] });
+    await seedPackage(t.db, { name: "nodejs", versions: [{ version: "22.0.0", attrPath: "nodejs_22" }] });
+
+    for (const phrase of ["node", "Node"]) {
+      expect(uniqueNames(await search({ phrase, version: "latest" }))).toEqual(["nodejs", "node-gyp", "node-red"]);
+      expect(uniqueNames(await search({ phrase }))).toEqual(["nodejs", "node-gyp", "node-red"]);
+    }
+  });
+
+  test("an alias need not be a prefix of, or similar to, the package it names", async () => {
+    await seedPackage(t.db, { name: "golangci-lint", versions: [{ version: "1.60.0" }] });
+    await seedPackage(t.db, { name: "go", versions: [{ version: "1.22.0" }] });
+
+    const latest = await search({ phrase: "golang", version: "latest" });
+    expect(uniqueNames(latest)).toEqual(["go", "golangci-lint"]);
+  });
+
+  test("an alias matches an attribute path when the package name differs", async () => {
+    await seedPackage(t.db, { name: "py3c", versions: [{ version: "1.4" }] });
+    await seedPackage(t.db, { name: "python", versions: [{ version: "3.13.0", attrPath: "python3" }] });
+
+    const latest = await search({ phrase: "py3", version: "latest" });
+    expect(uniqueNames(latest)).toEqual(["python", "py3c"]);
+  });
+
+  test("an alias outranks an exact match even as a dissimilar nested attribute", async () => {
+    // "k8s" shares no trigram with kubectl, and a nested attribute gets no
+    // top-level bonus, so only the alias score can put it ahead of a
+    // top-level package named exactly "k8s".
+    await seedPackage(t.db, { name: "k8s", versions: [{ version: "1.0.0" }] });
+    await seedPackage(t.db, { name: "kubectl", versions: [{ version: "1.31.0", attrPath: "pkgs.kubectl" }] });
+
+    const latest = await search({ phrase: "k8s", version: "latest" });
+    expect(uniqueNames(latest)).toEqual(["kubectl", "k8s"]);
+  });
+
+  test("an alias for a package that is not there changes nothing", async () => {
+    await seedPackage(t.db, { name: "node-gyp", versions: [{ version: "10.0.0" }] });
+
+    const latest = await search({ phrase: "node", version: "latest" });
+    expect(uniqueNames(latest)).toEqual(["node-gyp"]);
+  });
+
   test("an attribute-path prefix match is admitted even when the name is unrelated", async () => {
     await seedPackage(t.db, { name: "cpython", versions: [{ version: "3.12.0", attrPath: "python312" }] });
 

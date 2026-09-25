@@ -26,6 +26,7 @@ import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { escapeLike, normalize } from "@devbox-search/core";
 import { commits, createServingClient, meta, packages, schema, variants, versions } from "@devbox-search/db";
 import { parseConstraint, satisfies, type Constraint } from "./constraint";
+import { phraseAliases } from "./phraseAliases";
 
 export interface SearchQuery {
   /** Full-text search over names and attribute paths. */
@@ -451,13 +452,28 @@ export function useKnnMinPrefixRows(n: number | undefined): void {
  *
  * Replaces FTS5 bm25 (with its 10x top-level-attr weighting) with tiered
  * pg_trgm scoring: exact match, then prefix match, then trigram similarity,
- * with top-level attributes ranked above nested ones. Ranking drift versus
- * the old service is accepted — the CLI critical path is resolve, not search.
+ * with top-level attributes ranked above nested ones. A phrase that is a
+ * common word for a package (see phraseAliases) ranks that package above
+ * everything. Ranking drift versus the old service is accepted — the CLI
+ * critical path is resolve, not search.
  */
 export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const phrase = q.phrase!;
   const latestOnly = q.version === "latest";
   const prefix = sql`lower(${escapeLike(phrase)}) || '%'`;
+
+  // The packages the phrase is a common word for ("node" -> nodejs), by name
+  // or attribute path. They outscore anything else (at most 1000 + 100 + 25,
+  // an exact top-level match), even as a nested attribute with no trigram in
+  // common with the phrase ("k8s" -> kubectl), and are candidates of the
+  // prefix tier whatever their spelling, since "golang" is neither a prefix
+  // of nor similar to "go". A phrase without aliases (nearly every one) runs
+  // the same SQL as if this did not exist.
+  const aliases = phraseAliases(phrase);
+  const aliasList = sql.join(aliases.map((a) => sql`lower(${a})`), sql`, `);
+  const aliasRank = aliases.length > 0
+    ? sql`WHEN lower(search_terms.name) IN (${aliasList}) OR lower(search_terms.attr_path) IN (${aliasList}) THEN 2000`
+    : sql``;
 
   // The tiered score, selected as `rank` and ordered by that alias so the
   // ordering cannot drift from what is selected (ordering by a positional
@@ -469,6 +485,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const rank = sql<number>`
     max(
       CASE
+        ${aliasRank}
         WHEN lower(search_terms.name) = lower(${phrase}) THEN 1000
         WHEN lower(search_terms.attr_path) = lower(${phrase}) THEN 900
         WHEN lower(search_terms.name) LIKE ${prefix} ESCAPE '\\' THEN 800
@@ -557,6 +574,15 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   // matches (python313Packages.) on the sorting side. The indexes'
   // predicates are spelled the same way, so these arms match them.
   const candidateColumns = sql`search_terms.package_id, search_terms.name, search_terms.attr_path, search_terms.top_level_attr`;
+  // One arm per column, so each is a walk of that column's lower() index.
+  // Only the KNN branch below takes them: every alias has a letter or digit.
+  const aliasRows = aliases.length > 0
+    ? sql`
+        UNION ALL
+        SELECT ${candidateColumns} FROM search_terms WHERE lower(search_terms.name) IN (${aliasList})
+        UNION ALL
+        SELECT ${candidateColumns} FROM search_terms WHERE lower(search_terms.attr_path) IN (${aliasList})`
+    : sql``;
   const broad = sql`(SELECT broad FROM breadth)`;
   const nearestPrefixMatches = (topLevel: SQL) => sql`(
     SELECT ${candidateColumns}
@@ -589,6 +615,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
         WHERE ${broad} AND (search_terms.name = search_terms.attr_path) IS FALSE AND ${prefixMatch}
         UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NOT NULL`)}
         UNION ALL ${nearestPrefixMatches(sql`search_terms.top_level_attr IS NULL`)}
+        ${aliasRows}
       ) AS search_terms`
     : sql`search_terms WHERE ${prefixMatch}`;
   const tier = (rows: SQL) => sql`
