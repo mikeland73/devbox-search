@@ -40,6 +40,7 @@ describe("migration applies cleanly", () => {
       "commits",
       "meta",
       "packages",
+      "row_counts",
       "search_terms",
       "variant_ranges",
       "variants",

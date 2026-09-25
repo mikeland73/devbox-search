@@ -43,6 +43,13 @@
       "when": 1790278529708,
       "tag": "0005_search_terms_knn_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790317690401,
+      "tag": "0006_row_counts",
+      "breakpoints": true
     }
   ]
 }

@@ -332,6 +332,45 @@ export const searchTerms = pgTable(
   ],
 );
 
+/**
+ * Exact row counts of the serving tables, recounted by every import and by
+ * the seed (the only writers), so /status.json reads them instead of
+ * running `count(*)`: exact counts of variants and variant_ranges are a
+ * second of scanning per request, and they only change when an import runs.
+ * See {@link REFRESH_ROW_COUNTS}; the rows are only as fresh as the last
+ * import, so a data fix made by hand must run it too.
+ */
+export const rowCounts = pgTable("row_counts", {
+  tableName: text("table_name").primaryKey(),
+  rowCount: bigint("row_count", { mode: "number" }).notNull(),
+  countedAt: timestamp("counted_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** The tables {@link rowCounts} tracks. */
+export const COUNTED_TABLES = [
+  "packages",
+  "versions",
+  "variants",
+  "variant_ranges",
+  "meta",
+  "search_terms",
+  "commits",
+] as const;
+
+export type CountedTable = (typeof COUNTED_TABLES)[number];
+
+/**
+ * Recounts every table in {@link COUNTED_TABLES} into row_counts. Runs at
+ * the end of the import and seed transactions, so the counts commit with
+ * the rows they count; ~1 s against production.
+ */
+export const REFRESH_ROW_COUNTS = `
+  INSERT INTO row_counts (table_name, row_count, counted_at)
+  VALUES ${COUNTED_TABLES.map((t) => `('${t}', (SELECT count(*) FROM ${t}), now())`).join(",\n         ")}
+  ON CONFLICT (table_name) DO UPDATE
+    SET row_count = excluded.row_count, counted_at = excluded.counted_at
+`;
+
 export type Commit = typeof commits.$inferSelect;
 export type NewCommit = typeof commits.$inferInsert;
 export type Package = typeof packages.$inferSelect;

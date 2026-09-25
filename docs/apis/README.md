@@ -1351,7 +1351,7 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `counts` | object | yes | Exact `count(*)` of each table. |
+| `counts` | object | yes | Exact row count of each table, as of the last import (counted when it committed). |
 | `counts.packages` | integer | yes |  |
 | `counts.versions` | integer | yes |  |
 | `counts.variants` | integer | yes |  |

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { MIGRATIONS_FOLDER } from "./migrate.js";
-import { commits, meta, packages, searchTerms, variantRanges, variants, versions } from "./schema.js";
+import { COUNTED_TABLES, commits, meta, packages, searchTerms, variantRanges, variants, versions } from "./schema.js";
 import { getTableConfig } from "drizzle-orm/pg-core";
 
 const initSql = readFileSync(join(MIGRATIONS_FOLDER, "0000_init.sql"), "utf8");
@@ -29,6 +29,14 @@ describe("generated DDL", () => {
 
   test("open variant ranges have a partial index", () => {
     expect(initSql).toContain(`WHERE "variant_ranges"."last_seq" IS NULL`);
+  });
+
+  test("migration 0006 records a first count for every counted table", () => {
+    // Hand-written in the migration, so it can't follow COUNTED_TABLES by itself.
+    const rowCountsSql = readFileSync(join(MIGRATIONS_FOLDER, "0006_row_counts.sql"), "utf8");
+    for (const table of COUNTED_TABLES) {
+      expect(rowCountsSql, table).toContain(`('${table}', (SELECT count(*) FROM "${table}"), now())`);
+    }
   });
 });
 

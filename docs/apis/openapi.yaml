@@ -448,7 +448,7 @@ components:
       properties:
         counts:
           type: object
-          description: Exact `count(*)` of each table.
+          description: Exact row count of each table, as of the last import (counted when it committed).
           required: [packages, versions, variants, variant_ranges, meta, search_terms, commits]
           properties:
             packages: { type: integer }
