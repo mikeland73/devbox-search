@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { commitSystems } from "@devbox-search/db";
 import { resolve } from "./search";
-import { COMMON_PACKAGES, latestVersions, status } from "./status";
+import { COMMON_PACKAGES, homeStatus, latestVersions, status } from "./status";
 import { createTestDb, seedCommits, seedPackage, type TestDb } from "./testDb";
 
 let t: TestDb;
@@ -158,6 +158,30 @@ describe("status", () => {
       expect(pkgs[0]!.version, name).toBe(mine.version);
       expect([...new Set(pkgs.map((p) => p.system))].sort(), name).toEqual(mine.systems);
     }
+  });
+
+  test("homeStatus is the home page's subset of status", async () => {
+    await seedCommits(t.db, 3);
+    await seedPackage(t.db, {
+      name: "go",
+      versions: [
+        { version: "1.21.0", systems: ["x86_64-linux", "aarch64-darwin"] },
+        { version: "1.22.0", systems: ["x86_64-linux"] },
+      ],
+    });
+
+    const [home, full] = await Promise.all([homeStatus(), status()]);
+    expect(home.counts).toEqual({ packages: 1, versions: 2, commits: 3 });
+    expect(home.counts).toEqual({
+      packages: full.counts.packages,
+      versions: full.counts.versions,
+      commits: full.counts.commits,
+    });
+    expect(home.newest_commit).toEqual(full.newest_commit);
+    expect(home.latest_versions).toEqual(full.latest_versions);
+    expect(home.generated_at).toBeInstanceOf(Date);
+    // Nothing beyond what the page renders.
+    expect(Object.keys(home).sort()).toEqual(["counts", "generated_at", "latest_versions", "newest_commit"]);
   });
 
   test("serializes to JSON with ISO timestamps", async () => {

@@ -7,7 +7,7 @@
  * for: a version, an attribute path, and which systems have it.
  */
 
-import type { Status } from "../status";
+import type { HomeStatus } from "../status";
 import { ago, esc, integer, systemCells, systemHeaders } from "./format";
 import { commitLink, page } from "./layout";
 import { pkgPath, searchPath } from "./links";
@@ -28,7 +28,7 @@ export const HOME_CACHE_CONTROL = "public, s-maxage=300, stale-while-revalidate=
 
 const EXAMPLES = ["python", "go@^1.22", "nodejs@20", "ripgrep", "nodePackages.typescript"];
 
-export function renderHomePage(s: Status, origin: string): string {
+export function renderHomePage(s: HomeStatus, origin: string): string {
   const body = `<section class="hero">
   <h1>Every version of every nixpkgs package</h1>
   <p class="lead">Which nixpkgs commit has a package, what it is called there, and on which systems.</p>
@@ -57,7 +57,7 @@ ${renderLatest(s)}`;
 
 const API_DOCS_PATH = "https://github.com/mikeland73/devbox-search/blob/main/docs/apis/README.md";
 
-function renderStats(s: Status): string {
+function renderStats(s: HomeStatus): string {
   const head = s.newest_commit;
   const parts = [
     `<b>${integer(s.counts.packages)}</b> packages`,
@@ -75,7 +75,7 @@ function renderStats(s: Status): string {
  * One row per common package with a cell per system, so a version missing
  * on a platform reads as a gap in the column rather than a shorter list.
  */
-function renderLatest(s: Status): string {
+function renderLatest(s: HomeStatus): string {
   const rows = s.latest_versions.map((l) => {
     if (l.version === null) {
       return `<tr>

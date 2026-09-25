@@ -12,6 +12,7 @@
  */
 
 import { count, desc, eq, max, sql } from "drizzle-orm";
+import type { PgTable } from "drizzle-orm/pg-core";
 import {
   commits,
   commitSystems,
@@ -132,9 +133,39 @@ export interface Status {
   generated_at: Date;
 }
 
+/**
+ * What the home page shows: three of the counts, the newest commit and the
+ * `latest` table. A subset of {@link Status}, so a Status is also one.
+ */
+export interface HomeStatus {
+  counts: Pick<Status["counts"], "packages" | "versions" | "commits">;
+  newest_commit: CommitRef | null;
+  latest_versions: LatestVersion[];
+  generated_at: Date;
+}
+
+/**
+ * {@link status} without the numbers only /status shows.
+ *
+ * The expensive part of status() is the exact counts of the big tables
+ * (variants alone is ~450 ms of index-only scan on prod), and run
+ * concurrently they compete for the same compute: the variants count takes
+ * over a second when the others run beside it. The home page renders none
+ * of them — only packages, versions and commits, which together are ~100 ms
+ * — so it asks only for those.
+ */
+export async function homeStatus(): Promise<HomeStatus> {
+  const [counts, newest, latest] = await Promise.all([
+    countRows({ packages, versions, commits }),
+    commitAt("newest"),
+    latestVersions([...COMMON_PACKAGES]),
+  ]);
+  return { counts, newest_commit: newest, latest_versions: latest, generated_at: new Date() };
+}
+
 export async function status(): Promise<Status> {
   const [counts, oldest, newest, systems, sizeRows, latest] = await Promise.all([
-    countRows(),
+    countRows({ packages, versions, variants, variant_ranges: variantRanges, meta, search_terms: searchTerms, commits }),
     commitAt("oldest"),
     commitAt("newest"),
     systemStatuses(),
@@ -159,15 +190,15 @@ export async function status(): Promise<Status> {
   };
 }
 
-async function countRows(): Promise<Status["counts"]> {
-  const tables = { packages, versions, variants, variant_ranges: variantRanges, meta, search_terms: searchTerms, commits };
+/** Exact `count(*)` of each table, keyed as given. */
+async function countRows<K extends string>(tables: Record<K, PgTable>): Promise<Record<K, number>> {
   const entries = await Promise.all(
-    Object.entries(tables).map(async ([name, table]) => {
+    Object.entries<PgTable>(tables).map(async ([name, table]) => {
       const [row] = await db().select({ n: count() }).from(table);
       return [name, row!.n] as const;
     }),
   );
-  return Object.fromEntries(entries) as Status["counts"];
+  return Object.fromEntries(entries) as Record<K, number>;
 }
 
 async function commitAt(end: "oldest" | "newest"): Promise<CommitRef | null> {
