@@ -42,7 +42,7 @@ import { createWriteStream } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
-import { createImportClient } from "@devbox-search/db";
+import { createImportClient, REFRESH_ROW_COUNTS } from "@devbox-search/db";
 import { copyRows, type CopyValue } from "./copy.js";
 import { NAME_VERSION_SQL, PACKAGE_SPELLINGS_SQL } from "./sqliteQueries.js";
 import {
@@ -380,6 +380,9 @@ export async function seed(options: SeedOptions): Promise<SeedReport> {
         [table],
       );
     }
+
+    // What /status.json reports (see rowCounts in @devbox-search/db).
+    await client.query(REFRESH_ROW_COUNTS);
 
     await client.query("COMMIT");
 

@@ -16,7 +16,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { migrationStatements } from "@devbox-search/db";
+import { migrationStatements, REFRESH_ROW_COUNTS } from "@devbox-search/db";
 import { evalRows } from "./import.js";
 import { packageKey, toVersionRow } from "./seedTransform.js";
 import * as SQL from "./importSql.js";
@@ -208,6 +208,7 @@ async function runImport(
 
   await db.exec(SQL.INSERT_SEARCH_TERMS);
   await db.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, system, nixVersion]);
+  await db.exec(REFRESH_ROW_COUNTS);
   await db.exec("COMMIT");
 
   return {
@@ -247,6 +248,24 @@ describe("first import", () => {
     );
     expect(ranges).toHaveLength(2);
     expect(ranges.every((r) => r.last_seq === null)).toBe(true);
+  });
+
+  test("records the row counts /status.json reports", async () => {
+    await runImport(evalJson({ hello: { version: "2.12.1" }, go: { version: "1.22.5" } }), HASH(1), DAY(1), "x86_64-linux");
+    await runImport(evalJson({ hello: { version: "2.12.1" } }), HASH(1), DAY(1), "aarch64-linux");
+
+    const counts = await rows<{ table_name: string; row_count: string }>(
+      `SELECT table_name, row_count::text FROM row_counts ORDER BY table_name`,
+    );
+    expect(Object.fromEntries(counts.map((r) => [r.table_name, Number(r.row_count)]))).toEqual({
+      commits: 1,
+      meta: 1,
+      packages: 2,
+      search_terms: 2,
+      variant_ranges: 3,
+      variants: 3,
+      versions: 2,
+    });
   });
 });
 

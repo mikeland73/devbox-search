@@ -5,24 +5,16 @@
  * everyday packages.
  *
  * Everything here is derived from the schema's own bookkeeping (`commits`,
- * `commit_systems`) plus row counts, so it is cheap to keep honest. The row
- * counts are exact `count(*)`s — variants is ~4M rows, which is a few hundred
- * ms of index-only scan on Neon — and the queries run concurrently since
- * neon-http issues each as its own HTTP request.
+ * `commit_systems`, `row_counts`), so it is cheap to keep honest. The row
+ * counts are exact but not counted here: variants and variant_ranges are
+ * ~4M rows each, a second of scanning per request, and the only writers
+ * (the importer and the seed) recount into `row_counts` as they commit.
+ * The queries run concurrently since neon-http issues each as its own HTTP
+ * request.
  */
 
-import { count, desc, eq, max, sql } from "drizzle-orm";
-import type { PgTable } from "drizzle-orm/pg-core";
-import {
-  commits,
-  commitSystems,
-  meta,
-  packages,
-  searchTerms,
-  variantRanges,
-  variants,
-  versions,
-} from "@devbox-search/db";
+import { count, desc, eq, inArray, max, sql } from "drizzle-orm";
+import { commits, commitSystems, rowCounts, variants, versions, type CountedTable } from "@devbox-search/db";
 import { db, latestOrder, nameOrAttrPath, rowsOf } from "./search";
 
 /**
@@ -66,8 +58,7 @@ export const COMMON_PACKAGES = [
 
 /**
  * Cache policy for /status.json and /status: fresh enough to catch a stalled
- * import within minutes, cached enough that the ~4M-row counts aren't
- * recomputed per request.
+ * import within minutes.
  */
 export const STATUS_CACHE_CONTROL = "public, s-maxage=300, stale-while-revalidate=600";
 
@@ -108,7 +99,7 @@ export interface LatestVersion {
 }
 
 export interface Status {
-  /** Exact row counts per table. */
+  /** Exact row counts per table, as of the last import. */
   counts: {
     packages: number;
     versions: number;
@@ -144,19 +135,10 @@ export interface HomeStatus {
   generated_at: Date;
 }
 
-/**
- * {@link status} without the numbers only /status shows.
- *
- * The expensive part of status() is the exact counts of the big tables
- * (variants alone is ~450 ms of index-only scan on prod), and run
- * concurrently they compete for the same compute: the variants count takes
- * over a second when the others run beside it. The home page renders none
- * of them — only packages, versions and commits, which together are ~100 ms
- * — so it asks only for those.
- */
+/** {@link status} without the numbers only /status shows. */
 export async function homeStatus(): Promise<HomeStatus> {
   const [counts, newest, latest] = await Promise.all([
-    countRows({ packages, versions, commits }),
+    storedCounts(["packages", "versions", "commits"]),
     commitAt("newest"),
     latestVersions([...COMMON_PACKAGES]),
   ]);
@@ -165,7 +147,7 @@ export async function homeStatus(): Promise<HomeStatus> {
 
 export async function status(): Promise<Status> {
   const [counts, oldest, newest, systems, sizeRows, latest] = await Promise.all([
-    countRows({ packages, versions, variants, variant_ranges: variantRanges, meta, search_terms: searchTerms, commits }),
+    storedCounts(["packages", "versions", "variants", "variant_ranges", "meta", "search_terms", "commits"]),
     commitAt("oldest"),
     commitAt("newest"),
     systemStatuses(),
@@ -190,15 +172,24 @@ export async function status(): Promise<Status> {
   };
 }
 
-/** Exact `count(*)` of each table, keyed as given. */
-async function countRows<K extends string>(tables: Record<K, PgTable>): Promise<Record<K, number>> {
-  const entries = await Promise.all(
-    Object.entries<PgTable>(tables).map(async ([name, table]) => {
-      const [row] = await db().select({ n: count() }).from(table);
-      return [name, row!.n] as const;
+/**
+ * The row counts the last import (or the seed, or migration 0006) recorded
+ * for each table, keyed as given. Every tracked table has a row from
+ * migration 0006 on, so a missing one is a database that skipped it.
+ */
+async function storedCounts<K extends CountedTable>(tables: K[]): Promise<Record<K, number>> {
+  const rows = await db()
+    .select({ table: rowCounts.tableName, n: rowCounts.rowCount })
+    .from(rowCounts)
+    .where(inArray(rowCounts.tableName, tables));
+  const found = new Map(rows.map((r) => [r.table, r.n]));
+  return Object.fromEntries(
+    tables.map((t) => {
+      const n = found.get(t);
+      if (n === undefined) throw new Error(`row_counts has no row for ${t}; is migration 0006 applied?`);
+      return [t, n];
     }),
-  );
-  return Object.fromEntries(entries) as Record<K, number>;
+  ) as Record<K, number>;
 }
 
 async function commitAt(end: "oldest" | "newest"): Promise<CommitRef | null> {

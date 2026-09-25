@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { commitSystems } from "@devbox-search/db";
 import { resolve } from "./search";
 import { COMMON_PACKAGES, homeStatus, latestVersions, status } from "./status";
-import { createTestDb, seedCommits, seedPackage, type TestDb } from "./testDb";
+import { createTestDb, recordRowCounts, seedCommits, seedPackage, type TestDb } from "./testDb";
 
 let t: TestDb;
 
@@ -63,6 +63,7 @@ describe("status", () => {
       ],
     });
     await seedPackage(t.db, { name: "python3", versions: [{ version: "3.12.0", systems: ["x86_64-linux"] }] });
+    await recordRowCounts(t.db);
 
     const s = await status();
 
@@ -105,6 +106,21 @@ describe("status", () => {
       last_updated: new Date(Date.UTC(2026, 0, 1)),
     });
     expect(s.latest_versions.find((l) => l.name === "python")).toMatchObject({ version: null, systems: [] });
+  });
+
+  test("counts are the ones last recorded, not live", async () => {
+    await seedCommits(t.db, 1);
+    await seedPackage(t.db, { name: "go", versions: [{ version: "1.22.0", systems: ["x86_64-linux"] }] });
+    await recordRowCounts(t.db);
+    await seedPackage(t.db, { name: "ripgrep", versions: [{ version: "14.1.0", systems: ["x86_64-linux"] }] });
+
+    // ripgrep landed after the last recount, so neither view counts it yet.
+    const [s, home] = await Promise.all([status(), homeStatus()]);
+    expect(s.counts).toMatchObject({ packages: 1, versions: 1, variants: 1, commits: 1 });
+    expect(home.counts).toEqual({ packages: 1, versions: 1, commits: 1 });
+
+    await recordRowCounts(t.db);
+    expect((await status()).counts).toMatchObject({ packages: 2, versions: 2, variants: 2, commits: 1 });
   });
 
   test("latest versions agree with resolve() and keep input order", async () => {
@@ -169,6 +185,7 @@ describe("status", () => {
         { version: "1.22.0", systems: ["x86_64-linux"] },
       ],
     });
+    await recordRowCounts(t.db);
 
     const [home, full] = await Promise.all([homeStatus(), status()]);
     expect(home.counts).toEqual({ packages: 1, versions: 2, commits: 3 });

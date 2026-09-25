@@ -17,7 +17,8 @@
  *      d. maintain variant_ranges for THIS system: close ranges that are
  *         absent from this eval, open ranges for present variants that
  *         lack one, leave present+open alone;
- *      e. upsert search_terms, record the commit and commit_system.
+ *      e. upsert search_terms, record the commit and commit_system;
+ *      f. recount the tables into row_counts, which /status.json reads.
  *
  * Concurrency: a session advisory lock, matching the CI `concurrency: indexer`
  * group. Idempotent: a (commit, system) already in commit_systems is skipped.
@@ -28,7 +29,7 @@
  * the same SQL this does.
  */
 
-import { createImportClient } from "@devbox-search/db";
+import { createImportClient, REFRESH_ROW_COUNTS } from "@devbox-search/db";
 import { canonicalName, contentHash, decodeEvalJson, metaHash, type EvalPackage } from "@devbox-search/core";
 import { copyRows, type CopyValue } from "./copy.js";
 import { packageKey, toVersionRow } from "./seedTransform.js";
@@ -261,11 +262,16 @@ export async function importEval(options: ImportOptions): Promise<ImportResult> 
     const rangesOpened = opened.rowCount ?? 0;
 
     // ---------------------------------------------------------------------
-    // 3e. search_terms, commit_systems, done
+    // 3e. search_terms, commit_systems
     // ---------------------------------------------------------------------
     await client.query(SQL.INSERT_SEARCH_TERMS);
 
     await client.query(SQL.INSERT_COMMIT_SYSTEM, [commitSeq, options.system, options.nixVersion ?? null]);
+
+    // ---------------------------------------------------------------------
+    // 3f. Row counts, committed with the rows they count
+    // ---------------------------------------------------------------------
+    await client.query(REFRESH_ROW_COUNTS);
 
     await client.query("COMMIT");
     log(

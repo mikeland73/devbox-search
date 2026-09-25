@@ -140,6 +140,12 @@ back to `SYSTEMS`; `eval.yml` rejects them up front.
   commits it would walk to the oldest release in the bucket. Import the first
   commit by hand (see self-hosting.md, Bootstrap); it has to be a channel
   release commit or discover cannot anchor on it either.
+- **`/status.json`'s row counts come from `row_counts`, not `count(*)`.**
+  Every import and the seed recount the tables into it as they commit
+  (~1 s); an exact `count(*)` per request was a second
+  of the page's time. A data fix made by hand (the stub cleanup below, a
+  delete from psql) leaves the counts stale until the next import, so run
+  `REFRESH_ROW_COUNTS` (`packages/db/src/schema.ts`) after one.
 - **`semver_major/minor/patch` are `bigint`.** nixpkgs has strict-semver
   versions with a date-stamped component (`3.1.20220119140128`) that
   overflow int4.

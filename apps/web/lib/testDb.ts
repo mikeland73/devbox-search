@@ -10,7 +10,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { isPrerelease, parseSemver, sha256Hex, sortKey } from "@devbox-search/core";
 import {
@@ -19,6 +19,7 @@ import {
   meta,
   migrationStatements,
   packages,
+  REFRESH_ROW_COUNTS,
   schema,
   searchTerms,
   variantRanges,
@@ -110,6 +111,14 @@ export async function seedCommitSystems(db: SearchDb, heads: Record<string, numb
       Array.from({ length: head }, (_, i) => ({ commitSeq: i + 1, system })),
     ),
   );
+}
+
+/**
+ * Recounts the tables into row_counts, as the importer does when it commits.
+ * The fixture helpers don't, so status tests call this once seeding is done.
+ */
+export async function recordRowCounts(db: SearchDb): Promise<void> {
+  await db.execute(sql.raw(REFRESH_ROW_COUNTS));
 }
 
 /** Inserts one package with its versions, variants, meta and search terms. */
