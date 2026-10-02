@@ -15,17 +15,17 @@
     "@devbox-search/core": "workspace:*",
     "@devbox-search/db": "workspace:*",
     "drizzle-orm": "^0.45.3",
-    "next": "^16.3.6",
+    "next": "^16.3.7",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/react": "^19.3.0",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.1",
+    "vitest": "^5.0.2",
     "yaml": "^2.9.1"
   }
 }
