@@ -156,7 +156,7 @@ export function compareVersions(v: string, w: string): number {
     const rb = rankOf(cb);
     if (ra !== rb) return ra < rb ? -1 : 1;
     if (ca === undefined || cb === undefined) continue;
-    let n = 0;
+    let n: number;
     if (ca.cls === "numeric") {
       n = numericLength(ca.text) - numericLength(cb.text);
       if (n === 0) n = compareBytes(ca.text, cb.text);
