@@ -18,6 +18,7 @@ import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { migrationStatements, REFRESH_ROW_COUNTS } from "@devbox-search/db";
 import { evalRows } from "./import.js";
+import { applyBackfill, planBackfill, type BackfillDb, type BackfillEval } from "./backfill.js";
 import { packageKey, toVersionRow } from "./seedTransform.js";
 import * as SQL from "./importSql.js";
 
@@ -526,5 +527,168 @@ describe("INCOMPLETE_COMMITS (discover's backfill query)", () => {
     await seedCommit(1, "a".repeat(40), [...SYSTEMS, "i686-linux"]);
     const { rows } = await db.query(SQL.INCOMPLETE_COMMITS, [SYSTEMS]);
     expect(rows).toHaveLength(0);
+  });
+});
+
+describe("backfill (hidden-only evals of already-imported commits)", () => {
+  const SYSTEM = "x86_64-linux";
+
+  /** What `eval.nix --arg hiddenOnly true` emits: no version in the name. */
+  function hiddenJson(entries: Record<string, { version: string; store?: string }>) {
+    const out: Record<string, unknown> = {};
+    for (const [attrPath, spec] of Object.entries(entries)) {
+      out[attrPath] = {
+        name: attrPath,
+        pname: attrPath,
+        version: "",
+        system: SYSTEM,
+        outputName: "out",
+        outputs: { out: `/nix/store/${(spec.store ?? "b").repeat(32)}-${attrPath}` },
+        meta: { description: "a tool", platforms: [SYSTEM], _devboxSearchVersion: spec.version },
+      };
+    }
+    return out;
+  }
+
+  /** Forward imports of seqs 1..n, with `extra` in the evals from `fixedFrom` on. */
+  async function forward(n: number, fixedFrom = Infinity, extra: Record<string, { version: string }> = {}) {
+    for (let seq = 1; seq <= n; seq++) {
+      const entries = { hello: { version: "2.12.1" }, ...(seq >= fixedFrom ? extra : {}) };
+      await runImport(evalJson(entries), HASH(seq), DAY(seq), SYSTEM);
+    }
+  }
+
+  function hiddenEval(seq: number, entries: Record<string, { version: string; store?: string }>): BackfillEval {
+    return { system: SYSTEM, seq, rows: evalRows(hiddenJson(entries), HASH(seq), DAY(seq), SYSTEM) };
+  }
+
+  const pgliteDb: BackfillDb = {
+    query: async <R>(sql: string, params?: unknown[]) => {
+      const r = await db.query<R>(sql, params);
+      return { rows: r.rows, count: r.affectedRows ?? 0 };
+    },
+    stage: (table, columns, values) => stage(table, columns, values),
+  };
+
+  async function backfill(evals: BackfillEval[]) {
+    const imported = await rows<{ seq: number }>(
+      `SELECT commit_seq AS seq FROM commit_systems WHERE system = $1 ORDER BY commit_seq`,
+      [SYSTEM],
+    );
+    return applyBackfill(pgliteDb, planBackfill(evals, new Map([[SYSTEM, imported.map((r) => r.seq)]])));
+  }
+
+  async function rangesOf(attrPath: string) {
+    return rows<{ version: string; first_seq: number; last_seq: number | null; commit_seq: number }>(
+      `SELECT v.version, r.first_seq, r.last_seq, va.commit_seq
+       FROM variant_ranges r JOIN variants va ON va.id = r.variant_id JOIN versions v ON v.id = va.version_id
+       WHERE va.attr_path = $1 ORDER BY r.first_seq`,
+      [attrPath],
+    );
+  }
+
+  test("adds the old versions as closed ranges and extends the forward import's open one", async () => {
+    // The fixed eval landed at seq 4; seqs 1-3 were imported without gitwatch.
+    await forward(5, 4, { gitwatch: { version: "0.6" } });
+    const result = await backfill([
+      hiddenEval(1, { gitwatch: { version: "0.4" } }),
+      hiddenEval(2, { gitwatch: { version: "0.6" } }),
+      hiddenEval(3, { gitwatch: { version: "0.6" } }),
+    ]);
+
+    expect(await rangesOf("gitwatch")).toEqual([
+      { version: "0.4", first_seq: 1, last_seq: 1, commit_seq: 1 },
+      // One interval from seq 2, not [2,3] plus [4,open]. The variant row is
+      // the forward import's (commit_seq 4), not replaced by older content.
+      { version: "0.6", first_seq: 2, last_seq: null, commit_seq: 4 },
+    ]);
+    expect(result).toMatchObject({ newVersions: 1, newVariants: 1, rangesExtended: 1, rangesInserted: 1 });
+    // hello was never in a hidden-only eval and is untouched.
+    expect(await rangesOf("hello")).toEqual([{ version: "2.12.1", first_seq: 1, last_seq: null, commit_seq: 1 }]);
+  });
+
+  test("a package gone before the fix gets its package, search term and closed range", async () => {
+    await forward(4, 4);
+    await backfill([hiddenEval(1, { oldtool: { version: "A1" } }), hiddenEval(2, { oldtool: { version: "A1" } })]);
+
+    expect(await rangesOf("oldtool")).toEqual([{ version: "A1", first_seq: 1, last_seq: 2, commit_seq: 1 }]);
+    expect(await rows(`SELECT name, attr_path FROM search_terms WHERE name = 'oldtool'`)).toEqual([
+      { name: "oldtool", attr_path: "oldtool" },
+    ]);
+    const counts = await rows<{ table_name: string; row_count: string }>(
+      `SELECT table_name, row_count::text FROM row_counts WHERE table_name = 'variants'`,
+    );
+    expect(counts).toEqual([{ table_name: "variants", row_count: "2" }]);
+  });
+
+  test("an existing row older than the backfill's last observation is replaced", async () => {
+    // Like the seed-era rows the old service had for a few of these: last
+    // seen at seq 1, in nixpkgs again (rebuilt) at seq 3.
+    await forward(1, 1, { tool: { version: "1" } });
+    await forward(3);
+    await backfill([hiddenEval(3, { tool: { version: "1", store: "e" } })]);
+    const [variant] = await rows<{ store_hash: string; commit_seq: number }>(
+      `SELECT store_hash, commit_seq FROM variants WHERE attr_path = 'tool'`,
+    );
+    expect(variant).toEqual({ store_hash: "e".repeat(32), commit_seq: 3 });
+    expect((await rangesOf("tool")).map((r) => [r.first_seq, r.last_seq])).toEqual([
+      [1, 1],
+      [3, 3],
+    ]);
+  });
+
+  test("a commit without an eval does not break a run; an eval without the package does", async () => {
+    await forward(6, 7);
+    await backfill([
+      hiddenEval(1, { tool: { version: "1" } }),
+      // seq 2: no eval at all (failed); seq 3 present again → still one run
+      hiddenEval(3, { tool: { version: "1" } }),
+      hiddenEval(4, {}), // evaluated, tool absent → the run ended at 3
+      hiddenEval(5, { tool: { version: "1" } }),
+    ]);
+    expect((await rangesOf("tool")).map((r) => [r.first_seq, r.last_seq])).toEqual([
+      [1, 3],
+      [5, 5],
+    ]);
+  });
+
+  test("the variant row is the last observation, dated where that content first appeared", async () => {
+    await forward(4, 5);
+    await backfill([
+      hiddenEval(1, { tool: { version: "1", store: "c" } }),
+      hiddenEval(2, { tool: { version: "1", store: "d" } }),
+      hiddenEval(3, { tool: { version: "1", store: "d" } }),
+    ]);
+    const [variant] = await rows<{ store_hash: string; commit_seq: number }>(
+      `SELECT store_hash, commit_seq FROM variants WHERE attr_path = 'tool'`,
+    );
+    expect(variant).toEqual({ store_hash: "d".repeat(32), commit_seq: 2 });
+  });
+
+  test("running the same backfill again writes nothing", async () => {
+    await forward(5, 4, { gitwatch: { version: "0.6" } });
+    const evals = [hiddenEval(1, { gitwatch: { version: "0.4" } }), hiddenEval(3, { gitwatch: { version: "0.6" } })];
+    await backfill(evals);
+    const before = await rangesOf("gitwatch");
+    const again = await backfill(evals);
+    expect(again).toEqual({ newPackages: 0, newVersions: 0, newVariants: 0, rangesExtended: 0, rangesInserted: 0 });
+    expect(await rangesOf("gitwatch")).toEqual(before);
+  });
+
+  test("a dry run reports the counts and writes nothing", async () => {
+    await forward(3, 4);
+    const imported = new Map([[SYSTEM, [1, 2, 3]]]);
+    const plan = planBackfill([hiddenEval(1, { tool: { version: "1" } })], imported);
+    const result = await applyBackfill(pgliteDb, plan, () => {}, { dryRun: true });
+    expect(result).toMatchObject({ newPackages: 1, newVariants: 1, rangesInserted: 1 });
+    expect(await rows(`SELECT name FROM packages WHERE name = 'tool'`)).toEqual([]);
+  });
+
+  test("reaching into commits the fixed eval already imported is refused, writing nothing", async () => {
+    await forward(5, 4, { gitwatch: { version: "0.6" } });
+    await expect(
+      backfill([hiddenEval(3, { gitwatch: { version: "0.6" } }), hiddenEval(4, { gitwatch: { version: "0.6" } })]),
+    ).rejects.toThrow(/overlaps ranges the forward import already wrote/);
+    expect(await rangesOf("gitwatch")).toEqual([{ version: "0.6", first_seq: 4, last_seq: null, commit_seq: 4 }]);
   });
 });

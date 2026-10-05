@@ -40,6 +40,30 @@ gh workflow run index.yml -f limit=15
   import's 120-minute timeout.
 - Back-to-back dispatches queue rather than overlap.
 
+### Backfilling history the eval could not see
+
+The importer only appends commits newer than the head, so when `eval.nix`
+starts listing something it missed before, the new rows exist from that
+import on and older versions don't resolve. `backfill.yml` fills in history
+for the versions `eval.nix` passes in `meta._devboxSearchVersion`: it
+re-evaluates commits that were already imported with
+`eval.nix --arg hiddenOnly true` (just those ~200 derivations, ~15 s per
+system) and writes their variants and presence ranges in one transaction.
+
+```sh
+gh workflow run backfill.yml -f since=2025-10-01 -f through_seq=<seq>   # dry run
+gh workflow run backfill.yml -f since=2025-10-01 -f through_seq=<seq> -f dry_run=false
+```
+
+- `through_seq` is the last seq imported before the eval change, i.e. one
+  less than the first live range of a package that has one only because
+  of it (the workflow header has the query). A window that reaches into
+  commits already imported with those rows is refused, not merged.
+- A failed eval leaves a gap the ranges bridge, the way the forward import
+  closes a range at the previous imported seq. Re-running the same window
+  writes nothing, so re-dispatching after a partial failure is safe.
+- A year is ~377 commits: 38 batches of 10, ~10 min each, 20 at a time.
+
 ### Reading the numbers
 
 - `commits.committed_at` is the **nixpkgs commit date**, not when the row

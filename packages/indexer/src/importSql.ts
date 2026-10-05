@@ -285,3 +285,119 @@ export const INSERT_COMMIT_SYSTEM = `
   INSERT INTO commit_systems (commit_seq, system, nix_version) VALUES ($1, $2, $3)
   ON CONFLICT DO NOTHING
 `;
+
+// ---------------------------------------------------------------------------
+// Backfill (backfill.ts): history for rows an older eval could not see
+// ---------------------------------------------------------------------------
+
+/** stage_variants plus the system and content-change seq of each row. */
+export const STAGE_BACKFILL_VARIANTS_DDL = `
+  CREATE TEMP TABLE stage_backfill_variants (
+    system text NOT NULL, commit_seq integer NOT NULL,
+    name_key text NOT NULL, version text NOT NULL, attr_path text NOT NULL,
+    meta_hash char(64) NOT NULL, store_hash text NOT NULL, store_name text NOT NULL,
+    meta_name text NOT NULL, meta_version jsonb NOT NULL, program text NOT NULL,
+    broken boolean NOT NULL, insecure boolean NOT NULL, outputs jsonb NOT NULL,
+    content_hash char(64) NOT NULL
+  ) ON COMMIT DROP
+`;
+
+export const STAGE_BACKFILL_VARIANTS_COLUMNS = ["system", "commit_seq", ...STAGE_VARIANTS_COLUMNS];
+
+/**
+ * One row per presence interval. next_seq is the system's next imported seq
+ * after last_seq (NULL at the head): a live range starting there is the
+ * same presence continuing, so it is extended rather than duplicated.
+ */
+export const STAGE_BACKFILL_RANGES_DDL = `
+  CREATE TEMP TABLE stage_backfill_ranges (
+    system text NOT NULL, name_key text NOT NULL, version text NOT NULL, attr_path text NOT NULL,
+    first_seq integer NOT NULL, last_seq integer NOT NULL, next_seq integer
+  ) ON COMMIT DROP
+`;
+
+export const STAGE_BACKFILL_RANGES_COLUMNS = [
+  "system",
+  "name_key",
+  "version",
+  "attr_path",
+  "first_seq",
+  "last_seq",
+  "next_seq",
+];
+
+/** Joins a staged range to its variant; shared by the statements below. */
+const BACKFILL_RANGE_VARIANT = `
+  JOIN packages p ON lower(p.name) = s.name_key
+  JOIN versions v ON v.package_id = p.id AND v.version = s.version
+  JOIN variants va ON va.version_id = v.id AND va.system = s.system AND va.attr_path = s.attr_path
+`;
+
+/**
+ * Live ranges that overlap a staged one without being it. Non-empty means
+ * the backfill reaches into commits that were already imported with these
+ * rows (through-seq too high), so it is refused. A range starting at the
+ * same seq is the same interval from an earlier run of the same backfill.
+ */
+export const BACKFILL_OVERLAPS = `
+  SELECT s.system, p.name, s.version, s.attr_path, s.first_seq, s.last_seq,
+         r.first_seq AS live_first, r.last_seq AS live_last
+  FROM stage_backfill_ranges s
+  ${BACKFILL_RANGE_VARIANT}
+  JOIN variant_ranges r ON r.variant_id = va.id AND NOT r.seeded
+  WHERE r.first_seq <> s.first_seq
+    AND r.first_seq <= s.last_seq
+    AND coalesce(r.last_seq, 2147483647) >= s.first_seq
+  ORDER BY s.system, p.name, s.attr_path
+  LIMIT 5
+`;
+
+/**
+ * A variant that already exists keeps its row unless the backfill saw it
+ * later: the forward import's rows are always newer than the window, but a
+ * seed-era row (the old service listed a few of these packages) can be
+ * older, with a store path nixpkgs has since rebuilt.
+ */
+export const INSERT_BACKFILL_VARIANTS = `
+  INSERT INTO variants (
+    version_id, system, attr_path, meta_id, commit_seq, store_hash, store_name,
+    meta_name, meta_version, program, broken, insecure, outputs, content_hash
+  )
+  SELECT v.id, sv.system, sv.attr_path, m.id, sv.commit_seq, sv.store_hash, sv.store_name,
+         sv.meta_name, sv.meta_version, sv.program, sv.broken, sv.insecure,
+         sv.outputs, sv.content_hash
+  FROM stage_backfill_variants sv
+  JOIN packages p ON lower(p.name) = sv.name_key
+  JOIN versions v ON v.package_id = p.id AND v.version = sv.version
+  JOIN meta m ON m.hash = sv.meta_hash
+  ON CONFLICT (version_id, system, attr_path) DO UPDATE SET
+    meta_id = EXCLUDED.meta_id,
+    commit_seq = EXCLUDED.commit_seq,
+    store_hash = EXCLUDED.store_hash,
+    store_name = EXCLUDED.store_name,
+    meta_name = EXCLUDED.meta_name,
+    meta_version = EXCLUDED.meta_version,
+    program = EXCLUDED.program,
+    broken = EXCLUDED.broken,
+    insecure = EXCLUDED.insecure,
+    outputs = EXCLUDED.outputs,
+    content_hash = EXCLUDED.content_hash
+  WHERE variants.commit_seq < EXCLUDED.commit_seq
+`;
+
+/** Pulls back the start of a live range that the staged one runs into. */
+export const EXTEND_BACKFILL_RANGES = `
+  UPDATE variant_ranges r SET first_seq = s.first_seq
+  FROM stage_backfill_ranges s
+  ${BACKFILL_RANGE_VARIANT}
+  WHERE r.variant_id = va.id AND NOT r.seeded AND r.first_seq = s.next_seq
+`;
+
+/** Every other staged range, closed. A rerun conflicts and writes nothing. */
+export const INSERT_BACKFILL_RANGES = `
+  INSERT INTO variant_ranges (variant_id, first_seq, last_seq, seeded)
+  SELECT va.id, s.first_seq, s.last_seq, false
+  FROM stage_backfill_ranges s
+  ${BACKFILL_RANGE_VARIANT}
+  ON CONFLICT (variant_id, first_seq) DO NOTHING
+`;

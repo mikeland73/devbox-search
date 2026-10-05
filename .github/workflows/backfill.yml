@@ -1,0 +1,173 @@
+# Backfills history for packages that evals before #101 could not see:
+# top-level packages whose name carries no version nix-env can read
+# (`gitwatch`, `dotacat-v0.3.0`, `nix-info`). See backfill.ts.
+#
+# Dispatch by hand once the forward fix has been imported:
+#
+#   gh workflow run backfill.yml -f since=2025-10-01 -f through_seq=<seq>
+#
+# dry_run defaults to true: the import job runs every check and prints the
+# counts it would write, then rolls back. Re-run with -f dry_run=false.
+#
+# through_seq is the last commit imported before eval.nix passed those
+# versions, i.e. one less than the first seq with a live range for them:
+#
+#   SELECT min(r.first_seq) - 1 FROM variant_ranges r
+#   JOIN variants va ON va.id = r.variant_id
+#   WHERE va.attr_path = 'makeWrapper' AND NOT r.seeded;
+#
+# plan lists the imported commits in the window; eval runs the hidden-only
+# expression (`eval.nix --arg hiddenOnly true`, ~15 s and ~3 GB per system)
+# for batches of them; import writes the history in one transaction. A
+# failed eval is a gap the importer bridges, not an absence. Re-running the
+# same window writes nothing; a through_seq that is too high is refused.
+name: backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Oldest nixpkgs commit date to backfill (YYYY-MM-DD)"
+        required: true
+      through_seq:
+        description: "Last commit seq imported before the eval passed hidden versions"
+        required: true
+      dry_run:
+        description: "Run every check and count against the database, then roll back"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  # Same Nix as eval.yml, so the entries match what the daily eval lists.
+  NIX_VERSION: 2.35.2
+  # x86_64-darwin and i686-linux are frozen (#17); see index.yml.
+  SYSTEMS: x86_64-linux aarch64-linux aarch64-darwin
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      batches: ${{ steps.list.outputs.batches }}
+      count: ${{ steps.list.outputs.count }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - id: list
+        env:
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+          SINCE: ${{ inputs.since }}
+          THROUGH_SEQ: ${{ inputs.through_seq }}
+        run: |
+          node packages/indexer/dist/cli.js backfill-list \
+            --since "$SINCE" --through-seq "$THROUGH_SEQ" --systems "${SYSTEMS// /,}" --batch-size 10
+
+  eval:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    # 10 commits x 3 systems: ~10 min.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.batches) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: eval.nix
+          sparse-checkout-cone-mode: false
+
+      - uses: DeterminateSystems/nix-installer-action@v23
+        with:
+          nix-package-url: https://releases.nixos.org/nix/nix-${{ env.NIX_VERSION }}/nix-${{ env.NIX_VERSION }}-x86_64-linux.tar.xz
+
+      - name: Evaluate
+        env:
+          COMMITS: ${{ matrix.commits }}
+        run: |
+          set -o pipefail
+          mkdir out
+          failed=0
+          for entry in $COMMITS; do
+            hash=${entry%%=*}
+            systems=${entry#*=}
+            rm -rf nixpkgs && mkdir nixpkgs
+            if ! curl -fsSL "https://codeload.github.com/NixOS/nixpkgs/tar.gz/$hash" | tar -xz --strip-components=1 -C nixpkgs; then
+              echo "::warning::fetching $hash failed"; failed=$(( failed + 1 )); continue
+            fi
+            # The daily eval's invocation (eval.yml), plus hiddenOnly.
+            config='{ allowInsecure = true; allowInsecurePredicate = (pkg: true); allowUnfree = true; allowUnfreePredicate = (pkg: true); }'
+            if [ -f nixpkgs/pkgs/top-level/packages-config.nix ]; then
+              config="(import ./nixpkgs/pkgs/top-level/packages-config.nix) // $config"
+            fi
+            for system in ${systems//,/ }; do
+              out="out/hidden-$system-$hash.json.gz"
+              if nix-env --file ./eval.nix --query --available --meta --out-path --json \
+                   --arg config "$config" --arg hiddenOnly true --argstr system "$system" \
+                   2> err.log | gzip > "$out.tmp"; then
+                mv "$out.tmp" "$out"
+                echo "$hash $system: $(gzip -dc "$out" | jq length) entries"
+              else
+                # A gap, not an absence: the importer bridges it.
+                rm -f "$out.tmp"; tail -5 err.log
+                echo "::warning::eval of $hash/$system failed"; failed=$(( failed + 1 ))
+              fi
+            done
+          done
+          echo "failed: $failed" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: backfill-${{ matrix.batch }}
+          path: out
+          if-no-files-found: warn
+          retention-days: 7
+
+  import:
+    needs: [plan, eval]
+    # Whatever evaluated is worth importing; failed batches are gaps.
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Never alongside the daily import or a migration.
+    concurrency:
+      group: indexer
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: backfill-*
+          path: evals
+      - name: Backfill
+        env:
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+          THROUGH_SEQ: ${{ inputs.through_seq }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=(--dir evals --through-seq "$THROUGH_SEQ")
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          node packages/indexer/dist/cli.js backfill "${args[@]}"
+      - name: Summary
+        if: always()
+        run: node packages/indexer/dist/cli.js status >> "$GITHUB_STEP_SUMMARY"
+        env:
+          DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}

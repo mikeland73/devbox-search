@@ -44,7 +44,12 @@
 # (`26.11`), as nixpkgs does for its own unversioned tools (`lsb-release`).
 # Only those ~200 derivations change; every other entry is byte-identical,
 # so nothing already indexed churns.
-{ config, system }:
+#
+# `--arg hiddenOnly true` lists just those derivations, for backfilling
+# commits imported before this existed (`cli.js backfill`). Their entries
+# are identical to the full eval's, at ~15 s and ~3 GB instead of minutes
+# and ~15 GB.
+{ config, system, hiddenOnly ? false }:
 let
   shims = pkgs: {
     cudatoolkit = pkgs.cudaPackages.cudatoolkit;
@@ -75,6 +80,10 @@ let
     in drv // { _devboxSearchTopLevel = true; }
       // lib.optionalAttrs (v != "") { meta = (drv.meta or { }) // { _devboxSearchVersion = v; }; };
 in
-removeAttrs
-  (pkgs // lib.mapAttrs (_: visible) topLevel)
-  (pkgs._devboxSearchShims ++ [ "_devboxSearchShims" ])
+if hiddenOnly then
+  lib.mapAttrs (_: visible)
+    (lib.filterAttrs (_: drv: hiddenVersion drv != "") (removeAttrs topLevel pkgs._devboxSearchShims))
+else
+  removeAttrs
+    (pkgs // lib.mapAttrs (_: visible) topLevel)
+    (pkgs._devboxSearchShims ++ [ "_devboxSearchShims" ])
