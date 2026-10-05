@@ -191,10 +191,22 @@ function cleanPackage(attrPath: string, pkg: Record<string, unknown>): EvalPacka
   const outputs = convertOutputs(pkg, meta);
   const storeHash = outputs.length > 0 ? splitStorePath(outputs[0]!.path).hash : "";
 
+  // nix-env takes the version from `name` only. When that yields none,
+  // eval.nix passes the derivation's `version` attribute in meta instead;
+  // nix-env's pname is then the whole name, which may still end in it
+  // (`dotacat-v0.3.0`: v0.3.0 starts with a letter, so nix-env kept it).
+  let storeName = normalize(str(pkg["pname"]));
+  let storeVersion = normalize(str(pkg["version"]));
+  const hiddenVersion = normalize(str(meta["_devboxSearchVersion"]));
+  if (storeVersion === "" && hiddenVersion !== "") {
+    storeVersion = hiddenVersion;
+    if (storeName.endsWith("-" + hiddenVersion)) storeName = storeName.slice(0, -hiddenVersion.length - 1);
+  }
+
   return {
     storeHash,
-    storeName: normalize(str(pkg["pname"])),
-    storeVersion: normalize(str(pkg["version"])),
+    storeName,
+    storeVersion,
     metaName: normalize(str(meta["name"])),
     // MetaVersion is normally an array of parsed version components in the
     // legacy schema. For nix-env JSON the entire string is one component.
