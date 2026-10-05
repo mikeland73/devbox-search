@@ -55,7 +55,9 @@ critical path.
   `<status> <reason>: <message>` followed by a newline — with
   `Content-Type: text/plain; charset=utf-8`,
   `X-Content-Type-Options: nosniff` and
-  `Cache-Control: public, max-age=0, s-maxage=60`.
+  `Cache-Control: public, max-age=0, s-maxage=60`. The one exception
+  is `/v2/resolve`'s "not on this system" `404`, which is JSON with the
+  same `Cache-Control`.
 * **Rate limit.** The public deployment allows 1000 requests per 10
   minutes per client IP across every endpoint except `/readyz`; over
   that, requests get `429 Too Many Requests` from the Vercel edge (not
@@ -145,6 +147,18 @@ since the migration take part; a system frozen at the migration
 seed (x86_64-darwin) reports the commit of its own last change, as
 does every system when no common commit is known.
 
+**System filter.** With `system`, only versions that exist on that
+system are candidates, so `latest` and ranges pick the newest
+version the caller can install: Linux's libiconv rather than a
+newer darwin-only one, or on x86_64-darwin (no longer evaluated
+upstream) the last version evaluated for it. The response is
+otherwise the same: it lists every system the chosen version is on,
+so a lockfile written from it still serves the other platforms.
+When versions matching `version` exist, just not on that system, the
+`404` is JSON rather than plain text (`NotAvailableOnSystem`), so a
+client can say where the package is available instead of that it
+doesn't exist.
+
 Methods: `GET`, `HEAD`, `OPTIONS`
 
 #### Parameters
@@ -153,6 +167,7 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 | --- | --- | --- | --- |
 | `name` | query | yes | Package name (case-insensitive) or nixpkgs attribute path (case-sensitive). |
 | `version` | query | yes | `latest`, an exact version, a partial version, or an npm-style range (see *Version matching*). |
+| `system` | query | no | Only consider versions available on this Nix system (lowercased before matching). The response still covers every system the chosen version is on. Any other value is a `400`. |
 
 #### Responses
 
@@ -160,7 +175,7 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 | --- | --- | --- | --- |
 | 200 | `application/json` | [V2Resolve](#v2resolve) | The resolved version. |
 | 400 | `text/plain; charset=utf-8` | string | A required parameter is missing or empty, e.g. `400 Bad Request: empty name (set a ?name=<value> query parameter)`. |
-| 404 | `text/plain; charset=utf-8` | string | No version of the package matches. The message describes the normalized query, e.g. `no package found for: name = "python" && version = "9.99"`. |
+| 404 | `text/plain; charset=utf-8` | string | No version of the package matches. The message describes the normalized query, e.g. `no package found for: name = "python" && version = "9.99"`. With `system`, when matching versions exist only on other systems, the body is a JSON `NotAvailableOnSystem` (`Content-Type: application/json`) instead. |
 | 500 | `text/plain; charset=utf-8` | string | The database query failed. `500 Internal Server Error`, optionally followed by `: <context>`. |
 
 #### Examples
@@ -414,6 +429,135 @@ ETag: "9RUb7fC6AMr0Mnu4d5nXBLT5IGN"
 </details>
 
 <details>
+<summary><b>Newest version is on one system only</b> - <code>GET /v2/resolve?name=libiconv&amp;version=latest</code> → <code>200</code></summary>
+
+```http
+GET /v2/resolve?name=libiconv&version=latest
+```
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400
+ETag: "8p2TvE-9zY-QScjYgr4RQBuLX-e"
+
+{
+  "name": "libiconv",
+  "version": "115.100.1",
+  "summary": "Character set conversion library",
+  "systems": {
+    "aarch64-darwin": {
+      "flake_installable": {
+        "ref": {
+          "type": "github",
+          "owner": "NixOS",
+          "repo": "nixpkgs",
+          "rev": "0000000000000000000000000000000000000003"
+        },
+        "attr_path": "libiconv"
+      },
+      "last_updated": "2026-01-03T00:00:00Z",
+      "outputs": [
+        {
+          "name": "out",
+          "path": "/nix/store/5f9cfef1ae54f5b69d1e968d0b5d4565-libiconv-115.100.1-aarch64-darwin",
+          "default": true
+        }
+      ]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Only versions on the caller's system</b> - <code>GET /v2/resolve?name=libiconv&amp;version=latest&amp;system=x86_64-linux</code> → <code>200</code></summary>
+
+```http
+GET /v2/resolve?name=libiconv&version=latest&system=x86_64-linux
+```
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400
+ETag: "qPizuHTxHKWd2zs7KNtUKy37YkE"
+
+{
+  "name": "libiconv",
+  "version": "2.40",
+  "summary": "Character set conversion library",
+  "systems": {
+    "x86_64-linux": {
+      "flake_installable": {
+        "ref": {
+          "type": "github",
+          "owner": "NixOS",
+          "repo": "nixpkgs",
+          "rev": "0000000000000000000000000000000000000002"
+        },
+        "attr_path": "libiconv"
+      },
+      "last_updated": "2026-01-02T00:00:00Z",
+      "outputs": [
+        {
+          "name": "out",
+          "path": "/nix/store/78167b62b62e0e465bb054a022a34972-libiconv-2.40-x86_64-linux",
+          "default": true
+        }
+      ]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Exists, but not on the caller's system</b> - <code>GET /v2/resolve?name=libiconv&amp;version=115&amp;system=x86_64-linux</code> → <code>404</code></summary>
+
+```http
+GET /v2/resolve?name=libiconv&version=115&system=x86_64-linux
+```
+
+```http
+HTTP/1.1 404
+Content-Type: application/json
+Cache-Control: public, max-age=0, s-maxage=60
+ETag: "GorWjOEFrns-6FwNCnMwYpnRUJ3"
+
+{
+  "error": "not_available_on_system",
+  "message": "no package found for: name = \"libiconv\" && version = \"115\" && system = \"x86_64-linux\"",
+  "system": "x86_64-linux",
+  "available": [
+    "aarch64-darwin"
+  ]
+}
+```
+
+</details>
+
+<details>
+<summary><b>Unknown system</b> - <code>GET /v2/resolve?name=python&amp;version=latest&amp;system=riscv64-linux</code> → <code>400</code></summary>
+
+```http
+GET /v2/resolve?name=python&version=latest&system=riscv64-linux
+```
+
+```http
+HTTP/1.1 400
+Content-Type: text/plain; charset=utf-8
+Cache-Control: public, max-age=0, s-maxage=60
+X-Content-Type-Options: nosniff
+
+400 Bad Request: unknown system "riscv64-linux" (expected one of aarch64-darwin, aarch64-linux, x86_64-darwin, x86_64-linux)
+```
+
+</details>
+
+<details>
 <summary><b>No matching version</b> - <code>GET /v2/resolve?name=python&amp;version=9.99</code> → <code>404</code></summary>
 
 ```http
@@ -463,6 +607,11 @@ Returns the latest non-prerelease release of each matching package,
 at most 50 packages. An empty result set is a `200` with
 `total_results: 0`, not a `404`.
 
+With `system`, packages with no release on that system are left out
+(before the 50 are counted), and each package's latest release is
+chosen among those on it, as `/v2/resolve` does. `systems` still
+lists every system that release is on.
+
 Methods: `GET`, `HEAD`, `OPTIONS`
 
 #### Parameters
@@ -470,6 +619,7 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 | Name | In | Required | Description |
 | --- | --- | --- | --- |
 | `q` | query | yes | Search phrase, matched against package names and attribute paths. |
+| `system` | query | no | Only consider versions available on this Nix system (lowercased before matching). The response still covers every system the chosen version is on. Any other value is a `400`. |
 
 #### Responses
 
@@ -517,6 +667,39 @@ ETag: "v0qkk-08jJeSUYPtJ37fxpyzkPm"
       "attribute_path": "go-task",
       "systems": [
         "aarch64-darwin",
+        "x86_64-linux"
+      ]
+    }
+  ]
+}
+```
+
+</details>
+
+<details>
+<summary><b>Only releases on the caller's system</b> - <code>GET /v2/search?q=libiconv&amp;system=x86_64-linux</code> → <code>200</code></summary>
+
+```http
+GET /v2/search?q=libiconv&system=x86_64-linux
+```
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400
+ETag: "1kM6QVIoYEgZezH8rYN0uBLQwZ-"
+
+{
+  "query": "libiconv",
+  "total_results": 1,
+  "results": [
+    {
+      "name": "libiconv",
+      "summary": "Character set conversion library",
+      "last_updated": "2026-01-02T00:00:00Z",
+      "version": "2.40",
+      "attribute_path": "libiconv",
+      "systems": [
         "x86_64-linux"
       ]
     }
@@ -1410,6 +1593,17 @@ One resolved version, keyed by system.
 | `version` | string | yes |  |
 | `summary` | string | yes | The package's one-line description (`meta.description` in nixpkgs). |
 | `systems` | map of string → [V2ResolveSystem](#v2resolvesystem) | yes | One entry per Nix system on which this version exists. |
+
+### NotAvailableOnSystem
+
+The `/v2/resolve` 404 when matching versions exist, but none on the requested system.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `error` | `"not_available_on_system"` | yes |  |
+| `message` | string | yes | The plain-text 404's message, e.g. `no package found for: name = "libiconv" && version = "115" && system = "x86_64-linux"`. |
+| `system` | string | yes | The requested system, normalized. |
+| `available` | array of string | yes | The systems of the version the request resolves to without `system`, sorted. |
 
 ### V2ResolveSystem
 

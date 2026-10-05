@@ -196,8 +196,8 @@ const DOCS_SYSTEMS = ["aarch64-darwin", "x86_64-linux"];
 
 /**
  * A small corpus at the API's grain: canonical names with several versions
- * and attribute paths, a dotted attribute path, and a near-name for search
- * ranking. Dates and hashes come from {@link seedCommits}, so output is
+ * and attribute paths, a dotted attribute path, a near-name for search
+ * ranking, and a package whose newest version is on one system only. Dates and hashes come from {@link seedCommits}, so output is
  * deterministic.
  */
 export const DOCS_FIXTURE: FixturePackage[] = [
@@ -238,6 +238,18 @@ export const DOCS_FIXTURE: FixturePackage[] = [
     license: "Apache-2.0",
     program: "tsc",
     versions: [{ version: "5.5.4", commitSeq: 3 }],
+  },
+  {
+    // Apple's libiconv on darwin, glibc's on Linux.
+    name: "libiconv",
+    summary: "Character set conversion library",
+    homepage: "https://www.gnu.org/software/libiconv/",
+    license: "LGPL-2.1-or-later",
+    program: "iconv",
+    versions: [
+      { version: "115.100.1", commitSeq: 3, systems: ["aarch64-darwin"] },
+      { version: "2.40", commitSeq: 2, systems: ["x86_64-linux"] },
+    ],
   },
 ];
 
