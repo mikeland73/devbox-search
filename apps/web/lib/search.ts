@@ -37,8 +37,15 @@ export interface SearchQuery {
   version?: string;
   /** Exclude prerelease versions. */
   noPrerelease?: boolean;
-  /** Restrict to one Nix system. */
+  /** Restrict to one Nix system: other systems' rows are dropped. */
   system?: string;
+  /**
+   * Only versions that exist on this Nix system qualify, but the rows
+   * returned still cover every system the chosen version exists on. Unlike
+   * `system`, the response stays complete (devbox locks store paths for
+   * every system), while never picking a version the caller can't install.
+   */
+  availableOn?: string;
 }
 
 /**
@@ -113,6 +120,7 @@ export function normalizeQuery(q: SearchQuery): SearchQuery {
   if (q.name !== undefined) out.name = normalize(q.name);
   if (q.version !== undefined) out.version = normalize(q.version);
   if (q.system !== undefined) out.system = normalize(q.system.toLowerCase());
+  if (q.availableOn !== undefined) out.availableOn = normalize(q.availableOn.toLowerCase());
   if (q.noPrerelease !== undefined) out.noPrerelease = q.noPrerelease;
   return out;
 }
@@ -193,6 +201,25 @@ export function latestOrder(system: string | undefined): SQL[] {
   ];
 }
 
+/**
+ * The joined version has a variant on `system`. A probe of
+ * variants_identity_key (version_id, system).
+ */
+function versionOn(system: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM ${variants} o WHERE o.version_id = ${versions.id} AND o.system = ${system})`;
+}
+
+/**
+ * Some version of the package has a variant on `system`: the package's
+ * versions by package_id, then the same probe per version until one hits.
+ */
+function packageOn(packageId: SQL, system: string): SQL {
+  return sql`EXISTS (
+    SELECT 1 FROM ${versions} ve JOIN ${variants} va ON va.version_id = ve.id
+    WHERE ve.package_id = ${packageId} AND va.system = ${system}
+  )`;
+}
+
 /** The column list every searcher selects, joined into a ResultPackage. */
 const resultColumns = {
   name: packages.name,
@@ -256,6 +283,7 @@ export async function searchByName(q: SearchQuery): Promise<ResultPackage[]> {
   const conditions: SQL[] = [nameOrAttrPath(term)];
   if (q.noPrerelease === true) conditions.push(eq(versions.prerelease, false));
   if (q.system !== undefined && q.system !== "") conditions.push(eq(variants.system, q.system));
+  if (q.availableOn !== undefined && q.availableOn !== "") conditions.push(versionOn(q.availableOn));
 
   const rows = await baseQuery()
     .where(and(...conditions))
@@ -277,20 +305,25 @@ export async function searchByNameVersion(q: SearchQuery): Promise<ResultPackage
   const term = q.name!;
   const version = q.version!;
 
-  const scope: SQL[] = [nameOrAttrPath(term)];
-  if (q.noPrerelease === true) scope.push(eq(versions.prerelease, false));
-  if (q.system !== undefined && q.system !== "") scope.push(eq(variants.system, q.system));
+  // `filters` narrow the returned rows as well as the choice of version;
+  // `availableOn` only narrows the choice.
+  const filters: SQL[] = [];
+  if (q.noPrerelease === true) filters.push(eq(versions.prerelease, false));
+  if (q.system !== undefined && q.system !== "") filters.push(eq(variants.system, q.system));
+  const scope: SQL[] = [nameOrAttrPath(term), ...filters];
+  const availableOn = q.availableOn !== undefined && q.availableOn !== "" ? q.availableOn : undefined;
+  if (availableOn !== undefined) scope.push(eq(variants.system, availableOn));
 
   let versionId: number | undefined;
   if (version === "latest") {
-    versionId = await pickLatestVersionId(scope, q.system);
+    versionId = await pickLatestVersionId(scope, availableOn ?? q.system);
   } else {
     versionId = await pickConstrainedVersionId(term, version, scope);
   }
   if (versionId === undefined) return [];
 
   const rows = await baseQuery()
-    .where(and(eq(versions.id, versionId), ...scope.slice(1)))
+    .where(and(eq(versions.id, versionId), ...filters))
     .orderBy(asc(variants.system), asc(variants.attrPath))
     .limit(1000);
   return rows as ResultPackage[];
@@ -460,6 +493,12 @@ export function useKnnMinPrefixRows(n: number | undefined): void {
 export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const phrase = q.phrase!;
   const latestOnly = q.version === "latest";
+  const availableOn = q.availableOn !== undefined && q.availableOn !== "" ? q.availableOn : undefined;
+  // Packages with no version on the requested system are dropped while
+  // ranking, not afterwards, so they don't take places in the top
+  // PHRASE_LIMIT. tier() applies it per package; the KNN arms also apply
+  // it per row, because their LIMIT would otherwise count dropped rows.
+  const onSystem = availableOn !== undefined ? packageOn(sql`search_terms.package_id`, availableOn) : undefined;
   const prefix = sql`lower(${escapeLike(phrase)}) || '%'`;
 
   // The packages the phrase is a common word for ("node" -> nodejs), by name
@@ -589,6 +628,7 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
     FROM search_terms
     WHERE ${broad} AND (search_terms.name = search_terms.attr_path) IS TRUE AND ${topLevel}
       AND lower(search_terms.name) LIKE ${prefix} ESCAPE '\\'
+      ${onSystem !== undefined ? sql`AND ${onSystem}` : sql``}
     ORDER BY lower(search_terms.name) <-> lower(${phrase}), search_terms.name
     LIMIT ${PHRASE_LIMIT})`;
   const knn = /[\p{L}\p{N}]/u.test(phrase);
@@ -618,12 +658,23 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
         ${aliasRows}
       ) AS search_terms`
     : sql`search_terms WHERE ${prefixMatch}`;
-  const tier = (rows: SQL) => sql`
-    SELECT search_terms.package_id, search_terms.name, ${rank} AS rank
-    FROM ${rows}
-    GROUP BY search_terms.package_id, search_terms.name
-    ORDER BY rank DESC, search_terms.name
-    LIMIT ${PHRASE_LIMIT}`;
+  const tier = (rows: SQL) => {
+    const grouped = sql`
+      SELECT search_terms.package_id, search_terms.name, ${rank} AS rank
+      FROM ${rows}
+      GROUP BY search_terms.package_id, search_terms.name
+      ORDER BY rank DESC, search_terms.name`;
+    if (availableOn === undefined) return sql`${grouped} LIMIT ${PHRASE_LIMIT}`;
+    // Checked lazily, in rank order: OFFSET 0 keeps the planner from pushing
+    // the filter below the sort, so the LIMIT stops it at the PHRASE_LIMIT-th
+    // package that passes. Probing every candidate instead was 437 probes
+    // and 8.6 ms for "go" on aarch64-darwin (82 of them fail).
+    return sql`
+      SELECT * FROM (${grouped} OFFSET 0) AS ranked
+      WHERE ${packageOn(sql`ranked.package_id`, availableOn)}
+      ORDER BY rank DESC, name
+      LIMIT ${PHRASE_LIMIT}`;
+  };
   const result = await db().execute(sql`
     WITH ${knn ? breadth : sql``}
     prefix AS (${tier(prefixRows)}),
@@ -666,7 +717,8 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
 
   if (latestOnly) {
     // Per package, the non-prerelease version pickLatestVersionId would
-    // choose: the same ordering (latestOrder) over the package's variants.
+    // choose: the same ordering (latestOrder) over the package's variants,
+    // only those on `availableOn` when it is set.
     const rows = await db()
       .selectDistinctOn([sql`hits.ord`], { ...resultColumns, versionSystems })
       .from(hits)
@@ -676,7 +728,8 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
           FROM ${variants}
           JOIN ${versions} ON ${versions.id} = ${variants.versionId}
           WHERE ${versions.packageId} = hits.package_id AND ${versions.prerelease} = false
-          ORDER BY ${sql.join(latestOrder(undefined), sql`, `)}
+            ${availableOn !== undefined ? sql`AND ${variants.system} = ${availableOn}` : sql``}
+          ORDER BY ${sql.join(latestOrder(availableOn), sql`, `)}
           LIMIT 1
         ) AS latest`,
         sql`true`,
@@ -694,7 +747,12 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
   const rows = await db()
     .selectDistinctOn([sql`hits.ord`, versions.sortKey, versions.version], resultColumns)
     .from(hits)
-    .innerJoin(versions, sql`${versions.packageId} = hits.package_id`)
+    .innerJoin(
+      versions,
+      availableOn !== undefined
+        ? sql`${versions.packageId} = hits.package_id AND ${versionOn(availableOn)}`
+        : sql`${versions.packageId} = hits.package_id`,
+    )
     .innerJoin(variants, eq(variants.versionId, versions.id))
     .innerJoin(packages, eq(packages.id, versions.packageId))
     .innerJoin(meta, eq(meta.id, variants.metaId))

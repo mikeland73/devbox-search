@@ -21,6 +21,10 @@ import pg from "pg";
 
 const PHRASES = ["go", "python", "python313Packages.", "hello", "-"];
 const NAMES = ["go", "python", "python311", "hello"];
+/** The `system` filter's statements run for these, on a system some packages lack. */
+const SYSTEM = "aarch64-darwin";
+const SYSTEM_PHRASES = ["go", "python", "hello"];
+const SYSTEM_NAMES = ["go", "python"];
 
 /** The tiered rank expression shared by both candidate tiers. */
 const RANK = `max(
@@ -41,12 +45,30 @@ const RANK = `max(
 const PREFIX_MATCH = `(lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
    OR lower(search_terms.attr_path) LIKE lower($2) || '%' ESCAPE '\\')`;
 
-const tier = (rows) => `
+/** packageOn: some version of the term's package is on the system in `param`. */
+const packageOn = (param) => `EXISTS (
+    SELECT 1 FROM "versions" ve JOIN "variants" va ON va.version_id = ve.id
+    WHERE ve.package_id = search_terms.package_id AND va.system = ${param}
+  )`;
+
+/**
+ * `system` is the placeholder of the system filter, if any, which is
+ * checked lazily in rank order behind an OFFSET 0 fence.
+ */
+const tier = (rows, system) => {
+  const grouped = `
   SELECT search_terms.package_id, search_terms.name, ${RANK} AS rank
   FROM ${rows}
   GROUP BY search_terms.package_id, search_terms.name
-  ORDER BY rank DESC, search_terms.name
+  ORDER BY rank DESC, search_terms.name`;
+  if (!system) return `${grouped}
   LIMIT 50`;
+  return `
+  SELECT * FROM (${grouped} OFFSET 0) AS ranked
+  WHERE ${packageOn(system).replaceAll("search_terms.package_id", "ranked.package_id")}
+  ORDER BY rank DESC, name
+  LIMIT 50`;
+};
 
 /** KNN_MIN_PREFIX_ROWS in search.ts. */
 const KNN_MIN_PREFIX_ROWS = 10000;
@@ -54,11 +76,12 @@ const KNN_MIN_PREFIX_ROWS = 10000;
 const CANDIDATE_COLUMNS = `search_terms.package_id, search_terms.name, search_terms.attr_path, search_terms.top_level_attr`;
 
 /** One class's PHRASE_LIMIT nearest name-prefix matches, by trigram distance. */
-const nearest = (topLevel) => `(
+const nearest = (topLevel, system) => `(
   SELECT ${CANDIDATE_COLUMNS}
   FROM search_terms
   WHERE (SELECT broad FROM breadth) AND (search_terms.name = search_terms.attr_path) IS TRUE AND ${topLevel}
     AND lower(search_terms.name) LIKE lower($2) || '%' ESCAPE '\\'
+    ${system ? `AND ${packageOn(system)}` : ""}
   ORDER BY lower(search_terms.name) <-> lower($1), search_terms.name
   LIMIT 50)`;
 
@@ -67,7 +90,7 @@ const nearest = (topLevel) => `(
  * match when the phrase is narrow, the nearest matches per class when it is
  * broad (see searchByPhrase).
  */
-const PREFIX_ROWS = `(
+const prefixRows = (system) => `(
   SELECT ${CANDIDATE_COLUMNS} FROM search_terms
   WHERE NOT (SELECT broad FROM breadth) AND ${PREFIX_MATCH}
   UNION ALL
@@ -77,8 +100,8 @@ const PREFIX_ROWS = `(
   UNION ALL
   SELECT ${CANDIDATE_COLUMNS} FROM search_terms
   WHERE (SELECT broad FROM breadth) AND (search_terms.name = search_terms.attr_path) IS FALSE AND ${PREFIX_MATCH}
-  UNION ALL ${nearest("search_terms.top_level_attr IS NOT NULL")}
-  UNION ALL ${nearest("search_terms.top_level_attr IS NULL")}
+  UNION ALL ${nearest("search_terms.top_level_attr IS NOT NULL", system)}
+  UNION ALL ${nearest("search_terms.top_level_attr IS NULL", system)}
 ) AS search_terms`;
 
 const BREADTH = `breadth AS (
@@ -95,12 +118,12 @@ const BREADTH = `breadth AS (
  * full — the trigram-similarity tier. A phrase with no letters or digits
  * has no trigrams and always scores every prefix match.
  */
-const ranked = (knn) => `
+const ranked = (knn, system) => `
 WITH ${knn ? BREADTH : ""}
-prefix AS (${tier(knn ? PREFIX_ROWS : `search_terms WHERE ${PREFIX_MATCH}`)}),
+prefix AS (${tier(knn ? prefixRows(system) : `search_terms WHERE ${PREFIX_MATCH}`, system)}),
 fuzzy AS (${tier(`search_terms WHERE (SELECT count(*) FROM prefix) < 50
     AND (search_terms.name % $1 OR search_terms.attr_path % $1)
-    AND NOT ${PREFIX_MATCH}`)})
+    AND NOT ${PREFIX_MATCH}`, system)})
 SELECT package_id
 FROM (
   SELECT package_id, max(rank) AS rank, min(name) AS name
@@ -115,14 +138,14 @@ const RESULT_COLUMNS = `"packages"."name", "versions"."version", commit_hash.has
 const RESULT_JOINS = `inner join "versions" on "versions"."id" = "variants"."version_id" inner join "packages" on "packages"."id" = "versions"."package_id" inner join "meta" on "meta"."id" = "variants"."meta_id" inner join commits AS commit_hash on commit_hash.seq = "variants"."commit_seq"`;
 
 /** latestOrder: non-broken first, then newest live presence, then version. */
-const LATEST_ORDER = `EXISTS (SELECT 1 FROM "variants" b WHERE b.version_id = "versions"."id" AND NOT b.broken) desc, (
+const latestOrder = (system) => `EXISTS (SELECT 1 FROM "variants" b WHERE b.version_id = "versions"."id" AND NOT b.broken${system ? ` AND b.system = ${system}` : ""}) desc, (
     SELECT coalesce(max(coalesce(r.last_seq, 2147483647)), 0)
     FROM "variant_ranges" r
     WHERE r.variant_id = "variants"."id" AND NOT r.seeded
   ) desc, "versions"."sort_key" desc`;
 
 /** searchByPhrase, latest: one query for every ranked hit, one row per package. */
-const PHRASE_LATEST = `
+const phraseLatest = (system) => `
 select distinct on (hits.ord) ${RESULT_COLUMNS}
 from unnest(string_to_array($1, ',')::int[]) WITH ORDINALITY AS hits(package_id, ord)
 inner join LATERAL (
@@ -130,7 +153,8 @@ inner join LATERAL (
   FROM "variants"
   JOIN "versions" ON "versions"."id" = "variants"."version_id"
   WHERE "versions"."package_id" = hits.package_id AND "versions"."prerelease" = false
-  ORDER BY ${LATEST_ORDER}
+    ${system ? `AND "variants"."system" = ${system}` : ""}
+  ORDER BY ${latestOrder(system)}
   LIMIT 1
 ) AS latest on true
 inner join "variants" on "variants"."version_id" = latest.version_id
@@ -162,12 +186,12 @@ const TARGET = `"variants"."id" IN (
 )`;
 
 /** pickLatestVersionId, the first query of resolve@latest. */
-const PICK_LATEST = `
+const pickLatest = (system) => `
 select "versions"."id" from "variants"
 inner join "versions" on "versions"."id" = "variants"."version_id"
 inner join "packages" on "packages"."id" = "versions"."package_id"
-where (${TARGET} and "versions"."prerelease" = false)
-order by ${LATEST_ORDER} limit 1`;
+where (${TARGET} and "versions"."prerelease" = false${system ? ` and "variants"."system" = ${system}` : ""})
+order by ${latestOrder(system)} limit 1`;
 
 /** searchByName: every version of a package (/v2/pkg, /v1/pkg). */
 const BY_NAME = `
@@ -251,6 +275,12 @@ print("  `python`); it runs for `hello` and `-`. A `%` in the prefix arms, or a 
 print("  ran for `python`, is a regression: `%` is cheap to index but every GIN candidate is");
 print("  rechecked with similarity() — ~1.1 s of CPU for `python` when both tiers were one");
 print("  OR'd WHERE.");
+print("- **System filter** (`?system=`) adds one check per package: `versions` by package_id,");
+print("  then `variants_identity_key (version_id, system)` until one hits. In each tier it is a");
+print("  `Nested Loop Semi Join` over the already *sorted* groups, stopped by the `Limit`, so it");
+print("  probes about 50 packages; a `Filter: EXISTS(SubPlan …)` on the `GroupAggregate`");
+print("  instead means the `OFFSET 0` fence was lost and every candidate is probed (437 for");
+print("  `go`). In the nearest-match arms it is a semi-join per scanned row under their `Limit`.");
 print();
 
 print("## Phrase search (/v2/search, /v1/search)");
@@ -260,17 +290,31 @@ for (const phrase of PHRASES) {
   await explain(`ranked terms — q=${phrase}`, RANKED, [phrase, escapeLike(phrase)]);
   const { rows: hits } = await client.query(RANKED, [phrase, escapeLike(phrase)]);
   const ids = hits.map((h) => h.package_id).join(",");
-  await explain(`batched fetch, latest — q=${phrase} (${hits.length} hits)`, PHRASE_LATEST, [ids]);
+  await explain(`batched fetch, latest — q=${phrase} (${hits.length} hits)`, phraseLatest(), [ids]);
   await explain(`batched fetch, all versions — q=${phrase} (${hits.length} hits)`, PHRASE_ALL, [ids]);
 }
 
 print("## Name lookups (/v2/resolve, /v1/resolve, /v2/pkg, /v1/pkg)");
 print();
 for (const name of NAMES) {
-  await explain(`pick latest version — name=${name}`, PICK_LATEST, [name]);
+  await explain(`pick latest version — name=${name}`, pickLatest(), [name]);
 }
 for (const name of NAMES) {
   await explain(`every version — name=${name}`, BY_NAME, [name]);
+}
+
+print("## System filter (/v2/search?system=, /v2/resolve?system=)");
+print();
+for (const phrase of SYSTEM_PHRASES) {
+  const RANKED = ranked(/[\p{L}\p{N}]/u.test(phrase), "$3");
+  const params = [phrase, escapeLike(phrase), SYSTEM];
+  await explain(`ranked terms — q=${phrase}, system=${SYSTEM}`, RANKED, params);
+  const { rows: hits } = await client.query(RANKED, params);
+  const ids = hits.map((h) => h.package_id).join(",");
+  await explain(`batched fetch, latest — q=${phrase}, system=${SYSTEM} (${hits.length} hits)`, phraseLatest("$2"), [ids, SYSTEM]);
+}
+for (const name of SYSTEM_NAMES) {
+  await explain(`pick latest version — name=${name}, system=${SYSTEM}`, pickLatest("$2"), [name, SYSTEM]);
 }
 
 await client.end();
