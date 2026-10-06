@@ -6,6 +6,10 @@
  *                                 new releases plus known commits missing a system
  *   cli.js eval --nixpkgs DIR --system S --commit H --committed-at T --out F
  *   cli.js import --dir evals     import every archived eval in a directory
+ *   cli.js backfill-list --since 2025-10-01 --through-seq N --systems a,b,c
+ *                                 imported commits to re-evaluate hidden-only (GH output)
+ *   cli.js backfill --dir evals --through-seq N [--dry-run]
+ *                                 write history from hidden-only evals (backfill.ts)
  *   cli.js status                 a markdown summary of the index
  */
 
@@ -15,7 +19,9 @@ import { createImportClient } from "@devbox-search/db";
 import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits, withBackfill } from "./discover.js";
 import { INCOMPLETE_COMMITS } from "./importSql.js";
 import { evaluate } from "./evaluate.js";
-import { importEval } from "./import.js";
+import { evalRows, importEval } from "./import.js";
+import { applyBackfill, planBackfill, type BackfillDb, type BackfillEval } from "./backfill.js";
+import { copyRows } from "./copy.js";
 import { readEvalArchive } from "./readEval.js";
 
 function arg(name: string): string | undefined {
@@ -179,6 +185,121 @@ async function cmdImport(): Promise<void> {
   }
 }
 
+/** --through-seq as a positive integer, or exit. */
+function throughSeq(): number {
+  const raw = requireArg("through-seq");
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`--through-seq must be a commit seq, got ${raw}`);
+    process.exit(2);
+  }
+  return n;
+}
+
+/**
+ * Imported commits from --since through --through-seq, in batches for the
+ * backfill workflow's eval matrix. Each batch is a space-separated list of
+ * `hash=system,system` (the systems that commit was imported for).
+ */
+async function cmdBackfillList(): Promise<void> {
+  const since = requireArg("since");
+  const through = throughSeq();
+  const systems = requireArg("systems").split(",").map((s) => s.trim()).filter((s) => s !== "");
+  const batchSize = Number(arg("batch-size") ?? "10");
+  const { pool } = createImportClient();
+  try {
+    const { rows } = await pool.query<{ seq: number; hash: string; systems: string[] }>(
+      `SELECT c.seq, c.hash, array_agg(cs.system ORDER BY cs.system) AS systems
+       FROM commits c JOIN commit_systems cs ON cs.commit_seq = c.seq AND cs.system = ANY($3)
+       WHERE c.committed_at >= $1 AND c.seq <= $2
+       GROUP BY c.seq, c.hash ORDER BY c.seq`,
+      [since, through, systems],
+    );
+    const batches = [];
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const commits = rows.slice(i, i + batchSize).map((r) => `${r.hash}=${r.systems.join(",")}`);
+      batches.push({ batch: batches.length, commits: commits.join(" ") });
+    }
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+    console.log(
+      first === undefined || last === undefined
+        ? "no commits in range"
+        : `${rows.length} commits, seq ${first.seq}..${last.seq}, in ${batches.length} batches`,
+    );
+    setOutput("batches", JSON.stringify(batches));
+    setOutput("count", String(rows.length));
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Writes history from every hidden-{system}-{commit}.json.gz under --dir
+ * (eval.nix --arg hiddenOnly true). Each commit must already be imported for
+ * that system, at or before --through-seq: the last seq imported before the
+ * eval passed hidden versions.
+ */
+async function cmdBackfill(): Promise<void> {
+  const dir = requireArg("dir");
+  const through = throughSeq();
+  const files: Array<{ path: string; system: string; commit: string }> = [];
+  for (const entry of existsSync(dir) ? readdirSync(dir, { recursive: true, encoding: "utf8" }) : []) {
+    const m = /^hidden-([0-9a-z_-]+)-([0-9a-f]{40})\.json\.gz$/.exec(basename(entry));
+    if (m !== null) files.push({ path: join(dir, entry), system: m[1]!, commit: m[2]! });
+  }
+  if (files.length === 0) {
+    console.error(`no hidden-only evals found under ${dir}`);
+    process.exit(1);
+  }
+
+  const { pool } = createImportClient();
+  const client = await pool.connect();
+  try {
+    const commits = await client.query<{ hash: string; seq: number; committed_at: Date }>(
+      `SELECT hash, seq, committed_at FROM commits WHERE hash = ANY($1)`,
+      [[...new Set(files.map((f) => f.commit))]],
+    );
+    const byHash = new Map(commits.rows.map((r) => [r.hash, r]));
+    const imported = await client.query<{ system: string; seqs: number[] }>(
+      `SELECT system, array_agg(commit_seq ORDER BY commit_seq) AS seqs FROM commit_systems GROUP BY system`,
+    );
+    const importedSeqs = new Map(imported.rows.map((r) => [r.system, r.seqs]));
+
+    const evals: BackfillEval[] = [];
+    for (const f of files) {
+      const commit = byHash.get(f.commit);
+      if (commit === undefined || !(importedSeqs.get(f.system) ?? []).includes(commit.seq)) {
+        throw new Error(`${f.commit.slice(0, 12)}/${f.system} was never imported; backfill only fills in known commits`);
+      }
+      if (commit.seq > through) {
+        throw new Error(`${f.commit.slice(0, 12)} is seq ${commit.seq}, after --through-seq ${through}`);
+      }
+      const rows = evalRows(await readEvalArchive(f.path), f.commit, commit.committed_at, f.system);
+      evals.push({ system: f.system, seq: commit.seq, rows });
+    }
+    for (const system of [...new Set(evals.map((e) => e.system))].sort()) {
+      const seqs = evals.filter((e) => e.system === system).map((e) => e.seq);
+      console.log(`${system}: ${seqs.length} evals, seq ${Math.min(...seqs)}..${Math.max(...seqs)}`);
+    }
+
+    const plan = planBackfill(evals, importedSeqs);
+    const db: BackfillDb = {
+      query: async <R>(sql: string, params?: unknown[]) => {
+        const r = await client.query(sql, params);
+        return { rows: r.rows as R[], count: r.rowCount ?? 0 };
+      },
+      stage: async (table, columns, rows) => {
+        await copyRows(client, table, columns, rows);
+      },
+    };
+    await applyBackfill(db, plan, (m) => console.log(m), { dryRun: process.argv.includes("--dry-run") });
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
 async function cmdStatus(): Promise<void> {
   const { pool } = createImportClient();
   try {
@@ -228,10 +349,16 @@ switch (command) {
   case "import":
     await cmdImport();
     break;
+  case "backfill-list":
+    await cmdBackfillList();
+    break;
+  case "backfill":
+    await cmdBackfill();
+    break;
   case "status":
     await cmdStatus();
     break;
   default:
-    console.error(`usage: cli.js <discover|eval|import|status> [options]`);
+    console.error(`usage: cli.js <discover|eval|import|backfill-list|backfill|status> [options]`);
     process.exit(2);
 }
