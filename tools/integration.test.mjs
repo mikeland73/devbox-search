@@ -425,6 +425,62 @@ test("python@latest is the interpreter nixpkgs-unstable ships, not a stale line 
   assert.ok(age <= 14 * 86_400_000, `python@latest last_updated is ${Math.round(age / 86_400_000)} days behind the head`);
 });
 
+test("stdenv.cc.cc.lib and the rest of stdenv.cc resolve and are searchable", async (t) => {
+  // nix-env cannot reach these, so eval.nix lists them under placeholder
+  // names. They exist from the first import of an eval made with that
+  // eval.nix; until then there is nothing to check, so the test arms itself
+  // on the first one appearing.
+  const probe = await get("/v1/resolve?name=stdenv.cc&version=latest");
+  if (probe.status === 404) {
+    t.skip("index has no stdenv.cc yet: no eval with the _devboxSearchAttrPaths eval.nix has been imported");
+    return;
+  }
+
+  // The placeholder names never surface.
+  const placeholder = okJson(await get("/v2/search?q=_devboxSearchAttrPaths"), "/v2/search?q=_devboxSearchAttrPaths");
+  assert.equal(placeholder.total_results, 0);
+
+  for (const name of ["stdenv.cc", "stdenv.cc.cc", "stdenv.cc.cc.lib"]) {
+    const path = `/v2/search?q=${name}`;
+    assert.equal(okJson(await get(path), path).results[0]?.name, name, path);
+  }
+
+  // GCC on Linux, clang on darwin. Each system resolves on its own because
+  // the two compilers' versions differ, and `latest` is the higher one.
+  // stdenv.cc.libc is libSystem on darwin, which has no version and so is
+  // not imported; it is checked on Linux only.
+  const compilers = { "x86_64-linux": "gcc", "aarch64-linux": "gcc", "aarch64-darwin": "clang" };
+  for (const [system, cc] of Object.entries(compilers)) {
+    const expected = { "stdenv.cc": `${cc}-wrapper`, "stdenv.cc.cc": cc, "stdenv.cc.cc.lib": cc };
+    if (cc === "gcc") expected["stdenv.cc.libc"] = "glibc";
+    for (const [name, storeName] of Object.entries(expected)) {
+      const path = `/v1/resolve?name=${name}&version=latest&system=${system}`;
+      const body = okJson(await get(path), path);
+      assert.equal(body.name, name, path);
+      const info = body.systems[system];
+      assert.ok(info, `${path}: missing ${system}`);
+      assert.deepEqual(info.attr_paths, [name], `${path}: attr_paths`);
+      assert.equal(info.store_name, storeName, `${path}: store_name`);
+    }
+  }
+
+  // The path names one output, so that output alone is installed: devbox
+  // builds `#stdenv.cc.cc.lib^<defaults>`, and `out`/`man` here would pull
+  // in the whole compiler.
+  const path = "/v2/resolve?name=stdenv.cc.cc.lib&version=latest";
+  const body = okJson(await get(path), path);
+  for (const [system, info] of Object.entries(body.systems)) {
+    assert.equal(info.flake_installable.attr_path, "stdenv.cc.cc.lib", `${system} attr_path`);
+    const defaults = info.outputs.filter((o) => o.default);
+    assert.deepEqual(
+      defaults.map((o) => o.name),
+      ["lib"],
+      `${system} default outputs`,
+    );
+    assert.match(defaults[0].path, /^\/nix\/store\/[a-z0-9]{32}-.+-lib$/, `${system} lib path`);
+  }
+});
+
 test("GET /v1/resolve?name=python&version=3.11&system=x86_64-linux filters by system", async () => {
   const path = "/v1/resolve?name=python&version=3.11&system=x86_64-linux";
   const body = okJson(await get(path), path);
