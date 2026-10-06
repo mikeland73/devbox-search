@@ -1,4 +1,4 @@
-# The expression nix-env evaluates. It is nixpkgs, with two adjustments.
+# The expression nix-env evaluates. It is nixpkgs, with three adjustments.
 #
 # nix-env lists each derivation once: it walks attributes in lexicographic
 # order, recursing into sets that ask for it, and skips any attribute set it
@@ -30,6 +30,20 @@
 # puts the attribute back only where nixpkgs lacks it, and the output drops
 # it again so it is listed exactly as often as the alias would be: never.
 # Drop a shim once nixpkgs stops referring to the old name.
+#
+# Third: nix-env does not report a package's `version` attribute. It splits
+# `name` at the first dash followed by a non-letter and calls the rest the
+# version, and the importer drops anything that comes out empty. A package
+# whose name carries no version (`gitwatch`, version 0.6) or a version that
+# starts with a letter (`dotacat-v0.3.0`, `uefitool-A75`) was therefore
+# never indexed, though `nix build nixpkgs#gitwatch` works. For top-level
+# derivations whose name yields no version, the version attribute goes into
+# `meta._devboxSearchVersion`, which the importer reads when nix-env's is
+# empty. About a third have no version attribute either (`nix-info`,
+# `appimage-run`, wrappers like `influxdb2`); those get the nixpkgs release
+# (`26.11`), as nixpkgs does for its own unversioned tools (`lsb-release`).
+# Only those ~200 derivations change; every other entry is byte-identical,
+# so nothing already indexed churns.
 { config, system }:
 let
   shims = pkgs: {
@@ -44,7 +58,23 @@ let
   # throws, e.g. a removed alias); anything else already aborted the eval.
   isDerivation = _: v: let r = builtins.tryEval (lib.isDerivation v); in r.success && r.value;
   topLevel = lib.filterAttrs isDerivation pkgs;
+  # "" when nix-env can read a version from `name`, else the version
+  # attribute, else the nixpkgs release. `version` is read only for those,
+  # so the other ~25k derivations stay as lazy as before.
+  hiddenVersion = drv:
+    let
+      r = builtins.tryEval (
+        if (builtins.parseDrvName drv.name).version != "" then ""
+        else if builtins.isString (drv.version or null) && drv.version != "" then drv.version
+        else lib.trivial.release
+      );
+    in
+    if r.success then r.value else "";
+  visible = drv:
+    let v = hiddenVersion drv;
+    in drv // { _devboxSearchTopLevel = true; }
+      // lib.optionalAttrs (v != "") { meta = (drv.meta or { }) // { _devboxSearchVersion = v; }; };
 in
 removeAttrs
-  (pkgs // lib.mapAttrs (_: drv: drv // { _devboxSearchTopLevel = true; }) topLevel)
+  (pkgs // lib.mapAttrs (_: visible) topLevel)
   (pkgs._devboxSearchShims ++ [ "_devboxSearchShims" ])
