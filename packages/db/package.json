@@ -25,17 +25,17 @@
     "migrate": "node dist/migrate.js"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.0.0",
+    "@neondatabase/serverless": "^1.2.0",
     "drizzle-orm": "^0.45.3",
-    "pg": "^8.13.0",
+    "pg": "^8.23.1",
     "@devbox-search/core": "workspace:*"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",
-    "@types/node": "^26.6.3",
+    "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
     "drizzle-kit": "^0.31.11",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   }
 }
