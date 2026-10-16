@@ -27,12 +27,12 @@
     "stream-json": "^3.7.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite": "^0.5.9",
     "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "@types/pg": "^8.23.1",
     "@types/pg-copy-streams": "^1.2.5",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.4"
   }
 }
