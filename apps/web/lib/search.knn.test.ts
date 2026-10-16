@@ -8,8 +8,9 @@
  * The fixture is built so the nearest-match path has something to get
  * wrong: more than PHRASE_LIMIT rows in both the top-level and the nested
  * class, runs of names at equal similarity (ties broken by name), aliases
- * (name <> attr_path), an attribute-path-only prefix match, and a name that
- * differs from its attribute path only in case.
+ * (name <> attr_path), an attribute-path-only prefix match, a name that
+ * differs from its attribute path only in case, and packages on another
+ * system that a system filter must drop before the LIMIT, not after.
  */
 
 import { afterEach, beforeAll, afterAll, describe, expect, test } from "vitest";
@@ -45,6 +46,10 @@ beforeAll(async () => {
   // An attribute-path-only prefix match, and a case-only alias.
   await one("unrelated", "pyUnrelated");
   await one("Pyramid", "pyramid");
+  // Only on darwin, and ranked near the top of both classes.
+  for (const name of ["py0", "py1", "python3Packages.0"]) {
+    await seedPackage(t.db, { name, versions: [{ version: "1.0.0", systems: ["aarch64-darwin"] }] });
+  }
 }, 300_000);
 
 afterAll(async () => {
@@ -60,9 +65,14 @@ const PHRASES = ["py", "PY", "pyth", "python", "python3", "python3Packages.", "p
 const shape = (rows: ResultPackage[]) => rows.map((r) => [r.name, r.version, r.attrPath, r.system]);
 
 describe("nearest prefix matches rank exactly as scoring every prefix match", () => {
-  for (const version of ["latest", "all"]) {
-    test.each(PHRASES)(`%s (${version})`, async (phrase) => {
-      const query = version === "latest" ? { phrase, version } : { phrase };
+  for (const [version, availableOn] of [
+    ["latest", undefined],
+    ["all", undefined],
+    ["latest", "x86_64-linux"],
+    ["latest", "aarch64-darwin"],
+  ] as const) {
+    test.each(PHRASES)(`%s (${version}, ${availableOn ?? "any system"})`, async (phrase) => {
+      const query = { phrase, ...(version === "latest" ? { version } : {}), ...(availableOn ? { availableOn } : {}) };
       useKnnMinPrefixRows(1_000_000_000);
       const everything = await search(query);
       useKnnMinPrefixRows(0);
@@ -78,9 +88,17 @@ describe("nearest prefix matches rank exactly as scoring every prefix match", ()
     expect(names).toHaveLength(50);
     // The exact match, then the shortest top-level prefix matches (most
     // similar), ties by name.
-    expect(names.slice(0, 4)).toEqual(["py", "pya", "pyb", "pyc"]);
+    expect(names.slice(0, 4)).toEqual(["py", "py0", "py1", "pya"]);
     // The attribute-path-only match (700) ranks below every name-prefix
     // match of either class (800+), so a full page leaves it out.
     expect(names).not.toContain("unrelated");
+  });
+
+  test("a system filter drops packages before the page is cut", async () => {
+    useKnnMinPrefixRows(0);
+    const rows = await search({ phrase: "py", version: "latest", availableOn: "x86_64-linux" });
+    const names = [...new Set(rows.map((r) => r.name))];
+    expect(names).toHaveLength(50);
+    expect(names.slice(0, 4)).toEqual(["py", "pya", "pyb", "pyc"]);
   });
 });

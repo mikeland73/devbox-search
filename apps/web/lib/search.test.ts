@@ -362,6 +362,89 @@ describe("latest: the highest version still present in nixpkgs (#44)", () => {
   });
 });
 
+describe("availableOn: only versions on the caller's system qualify", () => {
+  // go 1.23.0 only evaluated on Linux so far; 1.22.5 everywhere.
+  const seedGo = () =>
+    seedPackage(t.db, {
+      name: "go",
+      versions: [
+        { version: "1.23.0", commitSeq: 3, systems: ["aarch64-linux", "x86_64-linux"] },
+        { version: "1.22.5", commitSeq: 2 },
+      ],
+    });
+  const systemsOf = (pkgs: Array<{ system: string }>) => [...new Set(pkgs.map((p) => p.system))].sort();
+
+  test("latest is the newest version on that system, with every system it is on", async () => {
+    await seedGo();
+
+    const linux = await resolve({ name: "go", version: "latest", availableOn: "x86_64-linux" });
+    expect(uniqueVersions(linux)).toEqual(["1.23.0"]);
+    expect(systemsOf(linux)).toEqual(["aarch64-linux", "x86_64-linux"]);
+
+    const darwin = await resolve({ name: "go", version: "latest", availableOn: "aarch64-darwin" });
+    expect(uniqueVersions(darwin)).toEqual(["1.22.5"]);
+    expect(systemsOf(darwin)).toEqual(["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux"]);
+  });
+
+  test("a constraint picks the highest matching version on that system", async () => {
+    await seedGo();
+
+    for (const version of ["1", "^1.22", ">=1.22 <2"]) {
+      const darwin = await resolve({ name: "go", version, availableOn: "aarch64-darwin" });
+      expect(uniqueVersions(darwin), version).toEqual(["1.22.5"]);
+    }
+    expect(await resolve({ name: "go", version: "1.23", availableOn: "aarch64-darwin" })).toEqual([]);
+  });
+
+  test("system, unlike availableOn, still drops the other systems' rows", async () => {
+    await seedGo();
+
+    const rows = await resolve({ name: "go", version: "latest", system: "aarch64-darwin" });
+    expect(uniqueVersions(rows)).toEqual(["1.22.5"]);
+    expect(systemsOf(rows)).toEqual(["aarch64-darwin"]);
+  });
+
+  test("presence is judged on that system", async () => {
+    // nixpkgs moved Linux back to 1.9 at seq 3, but darwin still lists 2.0.
+    await seedPackage(t.db, {
+      name: "foo",
+      versions: [
+        { version: "2.0", commitSeq: 2, lastSeq: { "x86_64-linux": 2 }, systems: ["aarch64-darwin", "x86_64-linux"] },
+        { version: "1.9", commitSeq: 3, systems: ["x86_64-linux"] },
+      ],
+    });
+
+    expect(uniqueVersions(await resolve({ name: "foo", version: "latest", availableOn: "x86_64-linux" }))).toEqual(["1.9"]);
+    expect(uniqueVersions(await resolve({ name: "foo", version: "latest", availableOn: "aarch64-darwin" }))).toEqual(["2.0"]);
+  });
+
+  test("phrase search drops packages not on that system and picks latest on it", async () => {
+    await seedGo();
+    await seedPackage(t.db, { name: "go-darwin-only", versions: [{ version: "1.0.0", systems: ["aarch64-darwin"] }] });
+
+    const linux = await search({ phrase: "go", version: "latest", availableOn: "x86_64-linux" });
+    expect(uniqueNames(linux)).toEqual(["go"]);
+    expect(uniqueVersions(linux)).toEqual(["1.23.0"]);
+
+    const darwin = await search({ phrase: "go", version: "latest", availableOn: "aarch64-darwin" });
+    expect(uniqueNames(darwin)).toEqual(["go", "go-darwin-only"]);
+    expect(darwin[0]?.version).toBe("1.22.5");
+    // The result still lists every system that version is on.
+    expect(darwin[0]?.versionSystems).toEqual(["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux"]);
+
+    // Every version listing keeps only the versions on that system.
+    expect(uniqueVersions(await search({ phrase: "go", availableOn: "aarch64-darwin" }))).toEqual(["1.22.5", "1.0.0"]);
+    expect(uniqueVersions(await search({ name: "go", availableOn: "aarch64-darwin" }))).toEqual(["1.22.5"]);
+  });
+
+  test("is normalized like every input", async () => {
+    await seedGo();
+
+    const rows = await resolve({ name: "go", version: "latest", availableOn: " X86_64-Linux " });
+    expect(uniqueVersions(rows)).toEqual(["1.23.0"]);
+  });
+});
+
 describe("result row decoding", () => {
   // The drivers hand timestamps back as strings; only a schema column (not a
   // raw `sql` fragment) goes through drizzle's Date mapping. The renderers

@@ -12,12 +12,13 @@
  */
 
 import { createHash } from "node:crypto";
+import { normalize } from "@devbox-search/core";
 
 /** One hour at the edge, a day of stale-while-revalidate. */
 export const CACHE_CONTROL = "public, s-maxage=3600, stale-while-revalidate=86400";
 
 /** Errors should not be cached at the edge for long. */
-const ERROR_CACHE_CONTROL = "public, max-age=0, s-maxage=60";
+export const ERROR_CACHE_CONTROL = "public, max-age=0, s-maxage=60";
 
 const ALLOWED_METHODS = "GET, HEAD, OPTIONS";
 
@@ -77,6 +78,32 @@ export function httpError(message: string, status: number): Response {
 
 export const badRequest = (message: string): Response => httpError("400 Bad Request: " + message, 400);
 export const notFound = (message: string): Response => httpError("404 Not Found: " + message, 404);
+
+/**
+ * 404 for a package that exists, just not on the requested system. JSON,
+ * unlike every other error, so a client can say where it is available
+ * rather than that it doesn't exist.
+ */
+export function notAvailableOnSystem(message: string, system: string, available: string[]): Response {
+  return json(
+    { error: "not_available_on_system", message, system, available },
+    { status: 404, cacheControl: ERROR_CACHE_CONTROL },
+  );
+}
+
+/** The systems a `system` parameter may name: the ones devbox installs on. */
+export const SYSTEMS = ["aarch64-darwin", "aarch64-linux", "x86_64-darwin", "x86_64-linux"];
+
+/**
+ * The optional `system` parameter, normalized like every input ("" when
+ * absent), or a 400 when it names a system outside {@link SYSTEMS}: a typo
+ * would otherwise quietly match nothing.
+ */
+export function systemParam(params: URLSearchParams): string | Response {
+  const system = normalize((params.get("system") ?? "").toLowerCase());
+  if (system === "" || SYSTEMS.includes(system)) return system;
+  return badRequest(`unknown system ${quote(system)} (expected one of ${SYSTEMS.join(", ")})`);
+}
 
 export function serverError(message: string, err: unknown): Response {
   console.error(`500 Internal Server Error: ${message}:`, err);
