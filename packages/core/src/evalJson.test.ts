@@ -137,6 +137,43 @@ describe("decodeEvalJson", () => {
   test("rejects non-object top level (legacy pkgmeta schema)", () => {
     expect(() => decodeEvalJson([{ commit: COMMIT }, {}], COMMIT, COMMITTED_AT)).toThrow(TypeError);
   });
+
+  test("a path eval.nix lists under a placeholder takes its real path from meta", () => {
+    // nix-env 2.35.2's entry for stdenv.cc.cc.lib on x86_64-linux, trimmed.
+    const decoded = decodeEvalJson(
+      {
+        "_devboxSearchAttrPaths.stdenv-cc-cc-lib": {
+          name: "gcc-16.2.0",
+          pname: "gcc",
+          version: "16.2.0",
+          system: "x86_64-linux",
+          outputName: "lib",
+          outputs: {
+            lib: "/nix/store/j7qx4s4mr17j1wqgvqdzj33lmrnzb387-gcc-16.2.0-lib",
+            man: "/nix/store/s22n97smsn3ilg8azajj8vv21j4fbis1-gcc-16.2.0-man",
+            out: "/nix/store/5q6bdxkp7lc70gn9mnf4yiybrx8ry5xq-gcc-16.2.0",
+          },
+          meta: {
+            description: "GNU Compiler Collection, version 16.2.0",
+            outputsToInstall: ["lib"],
+            _devboxSearchAttrPath: "stdenv.cc.cc.lib",
+          },
+        },
+      },
+      COMMIT,
+      COMMITTED_AT,
+    );
+    const [lib] = decoded.packages;
+    expect(lib!.attrPath).toBe("stdenv.cc.cc.lib");
+    expect(packageName(lib!)).toBe("stdenv.cc.cc.lib");
+    expect(lib!.storeHash).toBe("j7qx4s4mr17j1wqgvqdzj33lmrnzb387");
+    // Only the output the path names is installed by default.
+    expect(lib!.outputs.map((o) => [o.name, o.default])).toEqual([
+      ["lib", true],
+      ["man", false],
+      ["out", false],
+    ]);
+  });
 });
 
 describe("canonicalJson", () => {
