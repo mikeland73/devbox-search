@@ -436,6 +436,44 @@ test("GET /v1/resolve?name=python&version=3.11&system=x86_64-linux filters by sy
   assert.deepEqual(body.systems["x86_64-linux"].attr_paths, ["python311"]);
 });
 
+// x86_64-darwin is frozen at the migration seed (nixpkgs 26.11 dropped it),
+// so the newest go it ever had is frozen too.
+test("GET /v2/resolve?system=x86_64-darwin picks the last go it had, and lists every system", async () => {
+  const path = "/v2/resolve?name=go&version=latest&system=x86_64-darwin";
+  const body = okJson(await get(path), path);
+
+  assert.equal(body.version, "1.26.4");
+  assert.ok("x86_64-darwin" in body.systems, `${path}: x86_64-darwin missing`);
+  // A filter on the choice, not on the rows: the other systems are still there.
+  for (const system of INDEXED_SYSTEMS) assert.ok(system in body.systems, `${path}: ${system} missing`);
+});
+
+test("GET /v2/resolve for a package not on the requested system is a JSON 404", async () => {
+  const path = "/v2/resolve?name=systemd&version=latest&system=aarch64-darwin";
+  const res = await get(path);
+  assert.equal(res.status, 404, `${path}: ${res.status} ${res.text.slice(0, 200)}`);
+  assert.equal(res.contentType, "application/json", `${path}: content-type`);
+  assert.equal(res.body.error, "not_available_on_system");
+  assert.equal(res.body.system, "aarch64-darwin");
+  assert.ok(res.body.available.includes("x86_64-linux"), `${path}: available ${res.body.available}`);
+});
+
+test("GET /v2/resolve with an unknown system is a 400", async () => {
+  const path = "/v2/resolve?name=go&version=latest&system=x86_64-linx";
+  assertError(
+    await get(path),
+    400,
+    '400 Bad Request: unknown system "x86_64-linx" (expected one of aarch64-darwin, aarch64-linux, x86_64-darwin, x86_64-linux)',
+    path,
+  );
+});
+
+test("GET /v2/search?system= leaves out packages not on that system", async () => {
+  const names = async (path) => okJson(await get(path), path).results.map((r) => r.name);
+  assert.ok((await names("/v2/search?q=systemd")).includes("systemd"));
+  assert.ok(!(await names("/v2/search?q=systemd&system=aarch64-darwin")).includes("systemd"));
+});
+
 // ---------------------------------------------------------------------------
 // Resolve — errors
 // ---------------------------------------------------------------------------

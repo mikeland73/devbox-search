@@ -63,7 +63,9 @@ info:
       `<status> <reason>: <message>` followed by a newline — with
       `Content-Type: text/plain; charset=utf-8`,
       `X-Content-Type-Options: nosniff` and
-      `Cache-Control: public, max-age=0, s-maxage=60`.
+      `Cache-Control: public, max-age=0, s-maxage=60`. The one exception
+      is `/v2/resolve`'s "not on this system" `404`, which is JSON with the
+      same `Cache-Control`.
     * **Rate limit.** The public deployment allows 1000 requests per 10
       minutes per client IP across every endpoint except `/readyz`; over
       that, requests get `429 Too Many Requests` from the Vercel edge (not
@@ -182,6 +184,18 @@ paths:
         since the migration take part; a system frozen at the migration
         seed (x86_64-darwin) reports the commit of its own last change, as
         does every system when no common commit is known.
+
+        **System filter.** With `system`, only versions that exist on that
+        system are candidates, so `latest` and ranges pick the newest
+        version the caller can install: Linux's libiconv rather than a
+        newer darwin-only one, or on x86_64-darwin (no longer evaluated
+        upstream) the last version evaluated for it. The response is
+        otherwise the same: it lists every system the chosen version is on,
+        so a lockfile written from it still serves the other platforms.
+        When versions matching `version` exist, just not on that system, the
+        `404` is JSON rather than plain text (`NotAvailableOnSystem`), so a
+        client can say where the package is available instead of that it
+        doesn't exist.
       x-example-requests:
         - summary: Latest version
           path: /v2/resolve?name=python&version=latest
@@ -191,6 +205,14 @@ paths:
           path: /v2/resolve?name=go&version=^1.21
         - summary: Attribute path instead of a name
           path: /v2/resolve?name=go_1_21&version=latest
+        - summary: Newest version is on one system only
+          path: /v2/resolve?name=libiconv&version=latest
+        - summary: Only versions on the caller's system
+          path: /v2/resolve?name=libiconv&version=latest&system=x86_64-linux
+        - summary: Exists, but not on the caller's system
+          path: /v2/resolve?name=libiconv&version=115&system=x86_64-linux
+        - summary: Unknown system
+          path: /v2/resolve?name=python&version=latest&system=riscv64-linux
         - summary: No matching version
           path: /v2/resolve?name=python&version=9.99
         - summary: Missing parameter
@@ -198,6 +220,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/name"
         - $ref: "#/components/parameters/version"
+        - $ref: "#/components/parameters/availableOn"
       responses:
         "200":
           description: The resolved version.
@@ -208,11 +231,14 @@ paths:
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
-          description: "No version of the package matches. The message describes the normalized query, e.g. `no package found for: name = \"python\" && version = \"9.99\"`."
+          description: "No version of the package matches. The message describes the normalized query, e.g. `no package found for: name = \"python\" && version = \"9.99\"`. With `system`, when matching versions exist only on other systems, the body is a JSON `NotAvailableOnSystem` (`Content-Type: application/json`) instead."
           content:
             text/plain; charset=utf-8:
               schema:
                 type: string
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotAvailableOnSystem"
         "500":
           $ref: "#/components/responses/ServerError"
 
@@ -231,13 +257,21 @@ paths:
         Returns the latest non-prerelease release of each matching package,
         at most 50 packages. An empty result set is a `200` with
         `total_results: 0`, not a `404`.
+
+        With `system`, packages with no release on that system are left out
+        (before the 50 are counted), and each package's latest release is
+        chosen among those on it, as `/v2/resolve` does. `systems` still
+        lists every system that release is on.
       x-example-requests:
         - summary: Search
           path: /v2/search?q=go
+        - summary: Only releases on the caller's system
+          path: /v2/search?q=libiconv&system=x86_64-linux
         - summary: No matches
           path: /v2/search?q=zzzzzz
       parameters:
         - $ref: "#/components/parameters/q"
+        - $ref: "#/components/parameters/availableOn"
       responses:
         "200":
           description: Matching packages, best match first.
@@ -418,6 +452,14 @@ components:
       schema:
         type: string
         enum: [aarch64-darwin, aarch64-linux, x86_64-darwin, x86_64-linux]
+    availableOn:
+      name: system
+      in: query
+      required: false
+      description: Only consider versions available on this Nix system (lowercased before matching). The response still covers every system the chosen version is on. Any other value is a `400`.
+      schema:
+        type: string
+        enum: [aarch64-darwin, aarch64-linux, x86_64-darwin, x86_64-linux]
     q:
       name: q
       in: query
@@ -579,6 +621,26 @@ components:
           description: One entry per Nix system on which this version exists.
           additionalProperties:
             $ref: "#/components/schemas/V2ResolveSystem"
+
+    NotAvailableOnSystem:
+      type: object
+      description: The `/v2/resolve` 404 when matching versions exist, but none on the requested system.
+      required: [error, message, system, available]
+      properties:
+        error:
+          type: string
+          const: not_available_on_system
+        message:
+          type: string
+          description: "The plain-text 404's message, e.g. `no package found for: name = \"libiconv\" && version = \"115\" && system = \"x86_64-linux\"`."
+        system:
+          type: string
+          description: The requested system, normalized.
+        available:
+          type: array
+          items:
+            type: string
+          description: The systems of the version the request resolves to without `system`, sorted.
 
     V2ResolveSystem:
       type: object
