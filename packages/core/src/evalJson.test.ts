@@ -65,6 +65,38 @@ const nixEnvFixture = {
     outputs: { out: "/nix/store/0000000000000000000000000000000a-weird-1.0" },
     meta: {},
   },
+  gitwatch: {
+    // A name with no version: nix-env reports version "", and eval.nix
+    // passes the derivation's version attribute in meta.
+    name: "gitwatch",
+    pname: "gitwatch",
+    version: "",
+    system: "x86_64-linux",
+    outputName: "out",
+    outputs: { out: "/nix/store/0000000000000000000000000000000b-gitwatch" },
+    meta: { name: "gitwatch", _devboxSearchVersion: "0.6" },
+  },
+  dotacat: {
+    // A version starting with a letter: nix-env keeps it in pname.
+    name: "dotacat-v0.3.0",
+    pname: "dotacat-v0.3.0",
+    version: "",
+    system: "x86_64-linux",
+    outputName: "out",
+    outputs: { out: "/nix/store/0000000000000000000000000000000c-dotacat-v0.3.0" },
+    meta: { name: "dotacat-v0.3.0", _devboxSearchVersion: "v0.3.0" },
+  },
+  influxdb2: {
+    // As an archive from before eval.nix passed versions has it: decoded
+    // with an empty version, which the importer drops.
+    name: "influxdb2",
+    pname: "influxdb2",
+    version: "",
+    system: "x86_64-linux",
+    outputName: "out",
+    outputs: { out: "/nix/store/0000000000000000000000000000000d-influxdb2" },
+    meta: { name: "influxdb2" },
+  },
   brokenStub: {
     // What nix-env >= 2.2x emits for a package whose derivation refuses to
     // evaluate (meta.broken without allowBroken): no meta, no outputs.
@@ -83,7 +115,7 @@ describe("decodeEvalJson", () => {
   test("eval header", () => {
     expect(eval_.commit).toBe(COMMIT);
     expect(eval_.system).toBe("x86_64-linux");
-    expect(eval_.count).toBe(3);
+    expect(eval_.count).toBe(6);
     expect(eval_.committedAt).toBe(COMMITTED_AT);
   });
 
@@ -122,6 +154,21 @@ describe("decodeEvalJson", () => {
     const weird = byAttr.get("noSystem")!;
     expect(weird.system).toBe("x86_64-linux");
     expect(weird.storeHash).toBe("0000000000000000000000000000000a");
+  });
+
+  test("a version nix-env could not read from the name comes from eval.nix's meta field", () => {
+    const gitwatch = byAttr.get("gitwatch")!;
+    expect([gitwatch.storeName, gitwatch.storeVersion]).toEqual(["gitwatch", "0.6"]);
+    const dotacat = byAttr.get("dotacat")!;
+    expect([dotacat.storeName, dotacat.storeVersion]).toEqual(["dotacat", "v0.3.0"]);
+    // Only consulted when nix-env found nothing: go's own version wins.
+    const go = decodeEvalJson(
+      { go: { ...nixEnvFixture.go, meta: { ...nixEnvFixture.go.meta, _devboxSearchVersion: "9" } } },
+      COMMIT,
+      COMMITTED_AT,
+    ).packages[0]!;
+    expect(go.storeVersion).toBe("1.22.5");
+    expect(byAttr.get("influxdb2")!.storeVersion).toBe("");
   });
 
   test("a stub with no outputs (refused-to-evaluate package) is skipped, not imported unflagged", () => {

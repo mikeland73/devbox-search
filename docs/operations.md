@@ -110,6 +110,15 @@ back to `SYSTEMS`; `eval.yml` rejects them up front.
   `python314` vanished the day `buildbotPackages.python` aliased it (#49).
   The wrapper gives each top-level derivation a fresh attribute set so it is
   listed under its own name too.
+- **`nix-env` reads a version only from `name`.** It splits at the first
+  dash followed by a non-letter, so `gitwatch` (version 0.6) and
+  `dotacat-v0.3.0` came out with no version and the importer dropped them:
+  ~200 top-level packages, including hooks like `makeWrapper`, that
+  `nix build nixpkgs#…` builds but search never had. `eval.nix` passes
+  their `version` attribute in `meta._devboxSearchVersion`, or the nixpkgs
+  release (`26.11`) when there is none (`nix-info`, `appimage-run`), and
+  `decodeEvalJson` uses it when `nix-env`'s version is empty. Archives from
+  before that change have no such field and import as they did.
 - **An alias that nixpkgs still uses internally aborts the eval.**
   `packages-config.nix` turns aliases off, and a reference to a missing
   attribute is an error `nix-env` can't skip. Upstream's own search eval
