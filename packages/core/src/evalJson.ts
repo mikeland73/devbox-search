@@ -129,7 +129,10 @@ export function decodeEvalJson(json: unknown, commit: string, committedAt: Date)
     // description, broken=false because the meta that says otherwise is
     // absent. A package with no output path cannot be resolved, so skip it.
     if (asRecord(pkg["outputs"]) === null) continue;
-    const cleaned = cleanPackage(normalize(rawAttrPath), pkg);
+    // eval.nix lists paths nix-env cannot reach (stdenv.cc.cc.lib) under a
+    // placeholder name, with the real path in meta.
+    const attrPath = str(asRecord(pkg["meta"])?.["_devboxSearchAttrPath"]) || rawAttrPath;
+    const cleaned = cleanPackage(normalize(attrPath), pkg);
     // The eval's system is the first package's system. All packages in one
     // eval should have the same system.
     if (eval_.system === "") {

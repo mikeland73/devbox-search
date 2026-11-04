@@ -120,6 +120,11 @@ back to `SYSTEMS`; `eval.yml` rejects them up front.
   `error: attribute '…' missing` in the eval log, then add the name to
   `shims` in `eval.nix`. The attribute is available during evaluation but
   left out of the output.
+- **`eval.nix` also lists a few paths `nix-env` can't reach** (`stdenv.cc`,
+  `stdenv.cc.cc.lib`, …), under `_devboxSearchAttrPaths` with the real path
+  in `meta._devboxSearchAttrPath`. They can't be listed under their own
+  names: `nix-env` silently skips any attribute name containing a dot.
+  To add one, append it to `attrPaths`.
 - **A Linux eval is ~575 MB of JSON**, past V8's 536 MB string cap. The
   importer stream-parses with `stream-json` (#13); don't `JSON.parse` it.
 - Darwin systems evaluate fine on Linux: this is pure evaluation, nothing

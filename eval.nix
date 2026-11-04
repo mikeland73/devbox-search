@@ -1,4 +1,4 @@
-# The expression nix-env evaluates. It is nixpkgs, with two adjustments.
+# The expression nix-env evaluates. It is nixpkgs, with three adjustments.
 #
 # nix-env lists each derivation once: it walks attributes in lexicographic
 # order, recursing into sets that ask for it, and skips any attribute set it
@@ -30,6 +30,18 @@
 # puts the attribute back only where nixpkgs lacks it, and the output drops
 # it again so it is listed exactly as often as the alias would be: never.
 # Drop a shim once nixpkgs stops referring to the old name.
+#
+# Third: a few attribute paths people install by that nix-env cannot reach.
+# `stdenv.cc.cc.lib` (libstdc++, for prebuilt binaries such as Python wheels)
+# sits inside a derivation, and nix-env never descends into one. Nor can the
+# path simply be an attribute name: nix-env skips any name outside
+# [A-Za-z_][A-Za-z0-9-_+]*, so a name with a dot is silently dropped. Each
+# path is listed under _devboxSearchAttrPaths instead, carrying its real
+# path in meta._devboxSearchAttrPath, which the importer uses in place of the
+# listed one. A path naming one output (`.lib`) installs only that output
+# (`nix profile install …#stdenv.cc.cc.lib`), so its outputsToInstall says so
+# rather than inheriting the package's `out` and `man`. A path a system
+# lacks is left out on that system.
 { config, system }:
 let
   shims = pkgs: {
@@ -44,7 +56,19 @@ let
   # throws, e.g. a removed alias); anything else already aborted the eval.
   isDerivation = _: v: let r = builtins.tryEval (lib.isDerivation v); in r.success && r.value;
   topLevel = lib.filterAttrs isDerivation pkgs;
+  attrPaths = [ "stdenv.cc" "stdenv.cc.cc" "stdenv.cc.cc.lib" "stdenv.cc.libc" ];
+  listAttrPath = path:
+    let drv = lib.attrByPath (lib.splitString "." path) null pkgs;
+    in lib.optional (isDerivation path drv) {
+      name = lib.replaceStrings [ "." ] [ "-" ] path;
+      value = drv // {
+        meta = (drv.meta or { }) // { _devboxSearchAttrPath = path; }
+          // lib.optionalAttrs (drv.outputSpecified or false) { outputsToInstall = [ drv.outputName ]; };
+      };
+    };
 in
 removeAttrs
-  (pkgs // lib.mapAttrs (_: drv: drv // { _devboxSearchTopLevel = true; }) topLevel)
+  (pkgs // lib.mapAttrs (_: drv: drv // { _devboxSearchTopLevel = true; }) topLevel // {
+    _devboxSearchAttrPaths = lib.recurseIntoAttrs (lib.listToAttrs (lib.concatMap listAttrPath attrPaths));
+  })
   (pkgs._devboxSearchShims ++ [ "_devboxSearchShims" ])
