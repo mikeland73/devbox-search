@@ -21,7 +21,7 @@
  *   #5 LIKE wildcards in user input are escaped.
  */
 
-import { and, asc, desc, eq, isNotNull, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, or, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { escapeLike, normalize } from "@devbox-search/core";
 import { commits, createServingClient, meta, packages, schema, variants, versions } from "@devbox-search/db";
@@ -39,6 +39,11 @@ export interface SearchQuery {
   noPrerelease?: boolean;
   /** Restrict to one Nix system. */
   system?: string;
+  /**
+   * With a `latest` phrase search, each package's newest releases: this many,
+   * or every one with "all".
+   */
+  releases?: number | "all";
 }
 
 /**
@@ -75,6 +80,8 @@ export interface ResultPackage {
    * other systems. Undefined elsewhere, where the caller has all the rows.
    */
   versionSystems?: string[];
+  /** Set only when the query asked for `releases`. */
+  releases?: Array<{ version: string; systems: string[] }>;
 }
 
 /**
@@ -114,6 +121,7 @@ export function normalizeQuery(q: SearchQuery): SearchQuery {
   if (q.version !== undefined) out.version = normalize(q.version);
   if (q.system !== undefined) out.system = normalize(q.system.toLowerCase());
   if (q.noPrerelease !== undefined) out.noPrerelease = q.noPrerelease;
+  if (q.releases !== undefined) out.releases = q.releases;
   return out;
 }
 
@@ -223,15 +231,30 @@ const resultColumns = {
 } as const;
 
 /**
- * The systems a version exists on, as one aggregate per row. Served by
+ * The systems a version exists on, as one aggregate. Served by
  * variants_identity_key (leading column version_id), so it is an index scan
  * of the handful of rows that version has, not a table touch.
  */
-const versionSystems = sql<string[]>`(
-  SELECT array_agg(DISTINCT s.system ORDER BY s.system)
-  FROM ${variants} s
-  WHERE s.version_id = ${variants.versionId}
-)`;
+function systemsOf(versionId: SQL): SQL<string[]> {
+  return sql<string[]>`(
+    SELECT array_agg(DISTINCT s.system ORDER BY s.system)
+    FROM ${variants} s
+    WHERE s.version_id = ${versionId}
+  )`;
+}
+
+const versionSystems = systemsOf(sql`${variants.versionId}`);
+
+/**
+ * A package's releases, newest first. /v2/pkg and /v2/search's releases must
+ * use this one order, so that releases=n is a prefix of /v2/pkg's list (when
+ * /v2/pkg's name-or-attr_path lookup finds only that package). version and id
+ * break sort_key ties, which also keeps each version's rows together for the
+ * renderers' consecutive grouping.
+ */
+function releaseOrder(v: { sortKey: SQL | AnyColumn; version: SQL | AnyColumn; id: SQL | AnyColumn }): SQL[] {
+  return [desc(v.sortKey), asc(v.version), asc(v.id)];
+}
 
 /**
  * The base query: variants joined to their version, package, metadata, and
@@ -259,8 +282,7 @@ export async function searchByName(q: SearchQuery): Promise<ResultPackage[]> {
 
   const rows = await baseQuery()
     .where(and(...conditions))
-    .orderBy(desc(versions.sortKey), asc(variants.system), asc(variants.attrPath))
-    .limit(1000);
+    .orderBy(...releaseOrder(versions), asc(variants.system), asc(variants.attrPath));
   return rows as ResultPackage[];
 }
 
@@ -445,6 +467,30 @@ let knnMinPrefixRows = KNN_MIN_PREFIX_ROWS;
  */
 export function useKnnMinPrefixRows(n: number | undefined): void {
   knnMinPrefixRows = n ?? KNN_MIN_PREFIX_ROWS;
+}
+
+/**
+ * A phrase hit's newest releases, for /v2/search's `releases`. A select-list
+ * subquery, like versionSystems, so it runs once per result after the
+ * DISTINCT ON instead of riding through its sort. The variant check sits
+ * before the LIMIT because searchByName only sees versions that have variants.
+ */
+function newestReleases(count: number | "all"): SQL<ResultPackage["releases"]> {
+  const r = { sortKey: sql`r.sort_key`, version: sql`r.version`, id: sql`r.id` };
+  return sql<ResultPackage["releases"]>`(
+    SELECT coalesce(json_agg(json_build_object(
+      'version', r.version,
+      'systems', ${systemsOf(sql`r.id`)}
+    ) ORDER BY ${sql.join(releaseOrder(r), sql`, `)}), '[]')
+    FROM (
+      SELECT ${versions.id} AS id, ${versions.version} AS version, ${versions.sortKey} AS sort_key
+      FROM ${versions}
+      WHERE ${versions.packageId} = hits.package_id
+        AND EXISTS (SELECT 1 FROM ${variants} va WHERE va.version_id = ${versions.id})
+      ORDER BY ${sql.join(releaseOrder(versions), sql`, `)}
+      LIMIT ${count === "all" ? null : count}
+    ) AS r
+  )`;
 }
 
 /**
@@ -665,18 +711,23 @@ export async function searchByPhrase(q: SearchQuery): Promise<ResultPackage[]> {
     WITH ORDINALITY AS hits(package_id, ord)`;
 
   if (latestOnly) {
-    // Per package, the non-prerelease version pickLatestVersionId would
-    // choose: the same ordering (latestOrder) over the package's variants.
+    // Per package, the version resolve() picks at `latest`: the same ordering
+    // (latestOrder) over the package's variants, with prereleases only when
+    // the package has nothing else.
     const rows = await db()
-      .selectDistinctOn([sql`hits.ord`], { ...resultColumns, versionSystems })
+      .selectDistinctOn([sql`hits.ord`], {
+        ...resultColumns,
+        versionSystems,
+        ...(q.releases === undefined ? {} : { releases: newestReleases(q.releases) }),
+      })
       .from(hits)
       .innerJoin(
         sql`LATERAL (
           SELECT ${versions.id} AS version_id
           FROM ${variants}
           JOIN ${versions} ON ${versions.id} = ${variants.versionId}
-          WHERE ${versions.packageId} = hits.package_id AND ${versions.prerelease} = false
-          ORDER BY ${sql.join(latestOrder(undefined), sql`, `)}
+          WHERE ${versions.packageId} = hits.package_id
+          ORDER BY ${versions.prerelease}, ${sql.join(latestOrder(undefined), sql`, `)}
           LIMIT 1
         ) AS latest`,
         sql`true`,

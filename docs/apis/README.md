@@ -459,9 +459,14 @@ attribute-path prefix, then trigram similarity; top-level nixpkgs
 attributes outrank nested ones (`python3` above
 `emacsPackages.python`). Ties are broken by name.
 
-Returns the latest non-prerelease release of each matching package,
-at most 50 packages. An empty result set is a `200` with
+Returns the release `latest` resolves to for each matching package,
+a prerelease only when the package has no other release, at most 50
+packages. An empty result set is a `200` with
 `total_results: 0`, not a `404`.
+
+With `releases`, each result also lists the package's newest
+releases and the systems each exists on, so one request covers what
+would otherwise take a `/v2/pkg` call per result.
 
 Methods: `GET`, `HEAD`, `OPTIONS`
 
@@ -470,6 +475,7 @@ Methods: `GET`, `HEAD`, `OPTIONS`
 | Name | In | Required | Description |
 | --- | --- | --- | --- |
 | `q` | query | yes | Search phrase, matched against package names and attribute paths. |
+| `releases` | query | no | Add each result's newest releases: a positive integer `n` for the newest `n`, or `all` for every one. A count larger than a package's release list returns all of them. Any other value is a `400`. Without it the response is unchanged. |
 
 #### Responses
 
@@ -518,6 +524,76 @@ ETag: "v0qkk-08jJeSUYPtJ37fxpyzkPm"
       "systems": [
         "aarch64-darwin",
         "x86_64-linux"
+      ]
+    }
+  ]
+}
+```
+
+</details>
+
+<details>
+<summary><b>With each package's newest releases</b> - <code>GET /v2/search?q=go&amp;releases=2</code> → <code>200</code></summary>
+
+```http
+GET /v2/search?q=go&releases=2
+```
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400
+ETag: "h2p8ZGig_uX2tLiiBAzenJwzBlg"
+
+{
+  "query": "go",
+  "total_results": 2,
+  "results": [
+    {
+      "name": "go",
+      "summary": "The Go Programming language",
+      "last_updated": "2026-01-03T00:00:00Z",
+      "version": "1.22.5",
+      "attribute_path": "go",
+      "systems": [
+        "aarch64-darwin",
+        "x86_64-linux"
+      ],
+      "releases": [
+        {
+          "version": "1.22.5",
+          "systems": [
+            "aarch64-darwin",
+            "x86_64-linux"
+          ]
+        },
+        {
+          "version": "1.21.11",
+          "systems": [
+            "aarch64-darwin",
+            "x86_64-linux"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "go-task",
+      "summary": "Task runner / simpler Make alternative written in Go",
+      "last_updated": "2026-01-02T00:00:00Z",
+      "version": "3.38.0",
+      "attribute_path": "go-task",
+      "systems": [
+        "aarch64-darwin",
+        "x86_64-linux"
+      ],
+      "releases": [
+        {
+          "version": "3.38.0",
+          "systems": [
+            "aarch64-darwin",
+            "x86_64-linux"
+          ]
+        }
       ]
     }
   ]
@@ -912,7 +988,7 @@ X-Content-Type-Options: nosniff
 **Every version of one package (v1 shape)**
 
 All versions of a package, newest first, as a list of legacy
-version objects (at most 1000 underlying rows).
+version objects.
 
 Methods: `GET`, `HEAD`, `OPTIONS`
 
@@ -1464,9 +1540,19 @@ One matching package, at the release `latest` resolves to.
 | `name` | string | yes |  |
 | `summary` | string | yes |  |
 | `last_updated` | string (RFC 3339) | yes | Commit date of the package's latest release. |
-| `version` | string | yes | The latest non-prerelease version (what `?version=latest` would resolve to). |
+| `version` | string | yes | The version `?version=latest` resolves to; a prerelease only when the package has no other version. |
 | `attribute_path` | string | yes | The (alphabetically first) nixpkgs attribute path serving that version. |
 | `systems` | array of string | yes | Systems that version exists on, sorted. |
+| `releases` | array of [V2SearchRelease](#v2searchrelease) | no | Only with `?releases=`. The package's newest releases, newest first, in the same order as `/v2/pkg`'s `releases`, so `releases=n` is the first `n` of that list. `/v2/pkg` looks a package up by name or attribute path, so this holds as long as that lookup finds just this package. Like `/v2/pkg`, this lists every release, including prereleases and broken ones, so `releases[0]` is not necessarily `version`: a package whose newest release is `23.0.0-rc.1` lists that first while `version` is the `latest` pick, `22.0.0`. |
+
+### V2SearchRelease
+
+One release of a search result.
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `version` | string | yes |  |
+| `systems` | array of string | yes | Systems that version exists on, each once however many attribute paths serve it, sorted. |
 
 ### V2Pkg
 
@@ -1489,7 +1575,7 @@ One matching package, at the release `latest` resolves to.
 | `platforms` | array of [V2Platform](#v2platform) | yes | One entry per system (a system with several attribute paths is listed once). |
 | `platforms_summary` | string | yes | Display string such as `Linux and macOS (Apple Silicon only)`; empty when no supported platform is present. |
 | `outputs_summary` | string | yes | Display string such as `out, debug (Linux only)`; empty when every output is installed by default. |
-| `prerelease` | boolean | yes | Whether the version is a prerelease (`3.14.0rc1`). `latest` never picks one. |
+| `prerelease` | boolean | yes | Whether the version is a prerelease (`3.14.0rc1`). `latest` picks one only when a package has no other version. |
 | `broken` | boolean | yes | Whether `meta.broken` is set on *every* platform in `platforms`. A version still usable somewhere is not a broken release; the per-platform flags say where. |
 | `insecure` | boolean | yes | As `broken`, for `meta.insecure`. |
 

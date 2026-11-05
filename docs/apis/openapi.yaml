@@ -228,16 +228,37 @@ paths:
         attributes outrank nested ones (`python3` above
         `emacsPackages.python`). Ties are broken by name.
 
-        Returns the latest non-prerelease release of each matching package,
-        at most 50 packages. An empty result set is a `200` with
+        Returns the release `latest` resolves to for each matching package,
+        a prerelease only when the package has no other release, at most 50
+        packages. An empty result set is a `200` with
         `total_results: 0`, not a `404`.
+
+        With `releases`, each result also lists the package's newest
+        releases and the systems each exists on, so one request covers what
+        would otherwise take a `/v2/pkg` call per result.
       x-example-requests:
         - summary: Search
           path: /v2/search?q=go
+        - summary: With each package's newest releases
+          path: /v2/search?q=go&releases=2
         - summary: No matches
           path: /v2/search?q=zzzzzz
       parameters:
         - $ref: "#/components/parameters/q"
+        - name: releases
+          in: query
+          required: false
+          description: |
+            Add each result's newest releases: a positive integer `n` for the
+            newest `n`, or `all` for every one. A count larger than a
+            package's release list returns all of them. Any other value is a
+            `400`. Without it the response is unchanged.
+          schema:
+            type: string
+            pattern: "^([1-9][0-9]*|all)$"
+          examples:
+            newest: { value: "11" }
+            all: { value: all }
       responses:
         "200":
           description: Matching packages, best match first.
@@ -329,7 +350,7 @@ paths:
       summary: Every version of one package (v1 shape)
       description: |
         All versions of a package, newest first, as a list of legacy
-        version objects (at most 1000 underlying rows).
+        version objects.
       x-example-requests:
         - summary: Package versions
           path: /v1/pkg?name=go
@@ -669,13 +690,41 @@ components:
           description: Commit date of the package's latest release.
         version:
           type: string
-          description: The latest non-prerelease version (what `?version=latest` would resolve to).
+          description: The version `?version=latest` resolves to; a prerelease only when the package has no other version.
         attribute_path:
           type: string
           description: The (alphabetically first) nixpkgs attribute path serving that version.
         systems:
           type: array
           description: Systems that version exists on, sorted.
+          items:
+            type: string
+        releases:
+          type: array
+          description: |
+            Only with `?releases=`. The package's newest releases, newest
+            first, in the same order as `/v2/pkg`'s `releases`, so
+            `releases=n` is the first `n` of that list. `/v2/pkg` looks a
+            package up by name or attribute path, so this holds as long as
+            that lookup finds just this package.
+
+            Like `/v2/pkg`, this lists every release, including prereleases
+            and broken ones, so `releases[0]` is not necessarily `version`:
+            a package whose newest release is `23.0.0-rc.1` lists that first
+            while `version` is the `latest` pick, `22.0.0`.
+          items:
+            $ref: "#/components/schemas/V2SearchRelease"
+
+    V2SearchRelease:
+      type: object
+      description: One release of a search result.
+      required: [version, systems]
+      properties:
+        version:
+          type: string
+        systems:
+          type: array
+          description: Systems that version exists on, each once however many attribute paths serve it, sorted.
           items:
             type: string
 
@@ -729,7 +778,7 @@ components:
           description: Display string such as `out, debug (Linux only)`; empty when every output is installed by default.
         prerelease:
           type: boolean
-          description: Whether the version is a prerelease (`3.14.0rc1`). `latest` never picks one.
+          description: Whether the version is a prerelease (`3.14.0rc1`). `latest` picks one only when a package has no other version.
         broken:
           type: boolean
           description: |

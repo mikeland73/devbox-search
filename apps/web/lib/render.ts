@@ -106,6 +106,7 @@ export interface V2SearchResult {
   version: string;
   attribute_path: string;
   systems: string[];
+  releases?: Array<{ version: string; systems: string[] }>;
 }
 
 export interface V2Search {
@@ -201,6 +202,7 @@ export function renderV2Search(query: string, pkgs: ResultPackage[]): V2Search {
       version: p.version,
       attribute_path: p.attrPath,
       systems: p.versionSystems ?? [p.system],
+      ...(p.releases === undefined ? {} : { releases: p.releases }),
     })),
   };
 }

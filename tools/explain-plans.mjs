@@ -129,8 +129,38 @@ inner join LATERAL (
   SELECT "versions"."id" AS version_id
   FROM "variants"
   JOIN "versions" ON "versions"."id" = "variants"."version_id"
-  WHERE "versions"."package_id" = hits.package_id AND "versions"."prerelease" = false
-  ORDER BY ${LATEST_ORDER}
+  WHERE "versions"."package_id" = hits.package_id
+  ORDER BY "versions"."prerelease", ${LATEST_ORDER}
+  LIMIT 1
+) AS latest on true
+inner join "variants" on "variants"."version_id" = latest.version_id
+${RESULT_JOINS}
+order by hits.ord, "variants"."system" asc, "variants"."attr_path" asc
+limit 50`;
+
+/** As PHRASE_LATEST, with /v2/search's releases=11. */
+const PHRASE_LATEST_RELEASES = `
+select distinct on (hits.ord) ${RESULT_COLUMNS}, (
+  SELECT coalesce(json_agg(json_build_object(
+    'version', r.version,
+    'systems', (SELECT array_agg(DISTINCT s.system ORDER BY s.system) FROM "variants" s WHERE s.version_id = r.id)
+  ) ORDER BY r.sort_key DESC, r.version, r.id), '[]')
+  FROM (
+    SELECT "versions"."id" AS id, "versions"."version" AS version, "versions"."sort_key" AS sort_key
+    FROM "versions"
+    WHERE "versions"."package_id" = hits.package_id
+      AND EXISTS (SELECT 1 FROM "variants" va WHERE va.version_id = "versions"."id")
+    ORDER BY "versions"."sort_key" DESC, "versions"."version" ASC, "versions"."id" ASC
+    LIMIT 11
+  ) AS r
+) AS releases
+from unnest(string_to_array($1, ',')::int[]) WITH ORDINALITY AS hits(package_id, ord)
+inner join LATERAL (
+  SELECT "versions"."id" AS version_id
+  FROM "variants"
+  JOIN "versions" ON "versions"."id" = "variants"."version_id"
+  WHERE "versions"."package_id" = hits.package_id
+  ORDER BY "versions"."prerelease", ${LATEST_ORDER}
   LIMIT 1
 ) AS latest on true
 inner join "variants" on "variants"."version_id" = latest.version_id
@@ -173,8 +203,7 @@ order by ${LATEST_ORDER} limit 1`;
 const BY_NAME = `
 select ${RESULT_COLUMNS} from "variants" ${RESULT_JOINS}
 where (${TARGET})
-order by "versions"."sort_key" desc, "variants"."system" asc, "variants"."attr_path" asc
-limit 1000`;
+order by "versions"."sort_key" desc, "versions"."version" asc, "versions"."id" asc, "variants"."system" asc, "variants"."attr_path" asc`;
 
 const connectionString = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
 if (!connectionString) {
@@ -261,6 +290,7 @@ for (const phrase of PHRASES) {
   const { rows: hits } = await client.query(RANKED, [phrase, escapeLike(phrase)]);
   const ids = hits.map((h) => h.package_id).join(",");
   await explain(`batched fetch, latest — q=${phrase} (${hits.length} hits)`, PHRASE_LATEST, [ids]);
+  await explain(`batched fetch, latest, releases=11 — q=${phrase} (${hits.length} hits)`, PHRASE_LATEST_RELEASES, [ids]);
   await explain(`batched fetch, all versions — q=${phrase} (${hits.length} hits)`, PHRASE_ALL, [ids]);
 }
 
