@@ -4,7 +4,7 @@ The open-source search service for [devbox](https://github.com/jetify-com/devbox
 the API the devbox CLI calls to resolve packages (`python@3.11` → nixpkgs
 commit hash + attribute path) and to search nixpkgs. It replaces the original
 closed-source Go service behind `search.devbox.sh`, and the v1/v2 HTTP APIs
-stay byte-compatible with it so shipped CLIs keep working.
+stay byte-compatible with it, so shipped CLIs keep working.
 
 The same index is browsable at [nixsearch.com](https://nixsearch.com): every
 version of every package, on every system, with the commit that ships it
