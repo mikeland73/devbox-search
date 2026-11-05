@@ -326,29 +326,94 @@ export const STAGE_BACKFILL_RANGES_COLUMNS = [
   "next_seq",
 ];
 
-/** Joins a staged range to its variant; shared by the statements below. */
-const BACKFILL_RANGE_VARIANT = `
+/**
+ * Per system, the first and last seq this backfill has an eval of. Within
+ * it the evals are the truth, so an earlier backfill's ranges there give
+ * way to this one's.
+ */
+export const STAGE_BACKFILL_WINDOWS_DDL = `
+  CREATE TEMP TABLE stage_backfill_windows (
+    system text PRIMARY KEY, first_seq integer NOT NULL, last_seq integer NOT NULL
+  ) ON COMMIT DROP
+`;
+
+export const STAGE_BACKFILL_WINDOWS_COLUMNS = ["system", "first_seq", "last_seq"];
+
+/** The staged ranges with their variant ids, once the variants exist. */
+export const RESOLVE_BACKFILL_RANGES = `
+  CREATE TEMP TABLE backfill_ranges ON COMMIT DROP AS
+  SELECT va.id AS variant_id, s.system, s.first_seq, s.last_seq, s.next_seq
+  FROM stage_backfill_ranges s
   JOIN packages p ON lower(p.name) = s.name_key
   JOIN versions v ON v.package_id = p.id AND v.version = s.version
   JOIN variants va ON va.version_id = v.id AND va.system = s.system AND va.attr_path = s.attr_path
 `;
 
 /**
- * Live ranges that overlap a staged one without being it. Non-empty means
- * the backfill reaches into commits that were already imported with these
- * rows (through-seq too high), so it is refused. A range starting at the
- * same seq is the same interval from an earlier run of the same backfill.
+ * An earlier backfill's part of a range (variant_ranges.backfill_last_seq)
+ * that lies within this window, for a variant this one stages, and is not
+ * exactly a range this one stages: what a partial run left (a run closed
+ * early, or bridged over a failed eval). This run's evals replace it.
+ * Identical reruns match exactly, so they replace nothing.
+ */
+const STALE_BACKFILL_PART = `
+  r.backfill_last_seq IS NOT NULL AND NOT r.seeded
+  AND r.variant_id IN (SELECT variant_id FROM backfill_ranges)
+  AND EXISTS (
+    SELECT 1 FROM stage_backfill_windows w
+    WHERE w.system = va.system AND w.first_seq <= r.first_seq AND r.backfill_last_seq <= w.last_seq
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM backfill_ranges s
+    WHERE s.variant_id = r.variant_id AND s.first_seq = r.first_seq AND s.last_seq = r.backfill_last_seq
+  )
+`;
+
+/** A stale range a backfill wrote whole goes. */
+export const DELETE_STALE_BACKFILL_RANGES = `
+  DELETE FROM variant_ranges r USING variants va
+  WHERE va.id = r.variant_id AND r.last_seq = r.backfill_last_seq AND ${STALE_BACKFILL_PART}
+`;
+
+/**
+ * A forward-import range a stale backfill extended goes back to where the
+ * forward import started it: the system's next imported seq after the
+ * backfilled part (extension only ever joins a run to the range starting
+ * at its next_seq). EXTEND_BACKFILL_RANGES then joins it up again if this
+ * run's evals say so.
+ */
+export const UNEXTEND_STALE_BACKFILL_RANGES = `
+  UPDATE variant_ranges r SET
+    first_seq = (
+      SELECT min(cs.commit_seq) FROM commit_systems cs
+      WHERE cs.system = va.system AND cs.commit_seq > r.backfill_last_seq
+    ),
+    backfill_last_seq = NULL
+  FROM variants va
+  WHERE va.id = r.variant_id AND (r.last_seq IS NULL OR r.last_seq > r.backfill_last_seq) AND ${STALE_BACKFILL_PART}
+`;
+
+/**
+ * Ranges that overlap a staged one without being it. Non-empty means the
+ * backfill reaches into commits the forward import already wrote these rows
+ * for (through-seq too high), or into an earlier backfill's range that
+ * runs past this window, so it is refused. Being it means this backfill
+ * already wrote it: same start, and its backfilled part ends where the
+ * staged range does.
  */
 export const BACKFILL_OVERLAPS = `
-  SELECT s.system, p.name, s.version, s.attr_path, s.first_seq, s.last_seq,
-         r.first_seq AS live_first, r.last_seq AS live_last
-  FROM stage_backfill_ranges s
-  ${BACKFILL_RANGE_VARIANT}
-  JOIN variant_ranges r ON r.variant_id = va.id AND NOT r.seeded
-  WHERE r.first_seq <> s.first_seq
+  SELECT s.system, p.name, v.version, va.attr_path, s.first_seq, s.last_seq,
+         r.first_seq AS live_first, r.last_seq AS live_last,
+         CASE WHEN r.backfill_last_seq IS NULL THEN 'forward import' ELSE 'earlier backfill' END AS written_by
+  FROM backfill_ranges s
+  JOIN variant_ranges r ON r.variant_id = s.variant_id AND NOT r.seeded
+  JOIN variants va ON va.id = s.variant_id
+  JOIN versions v ON v.id = va.version_id
+  JOIN packages p ON p.id = v.package_id
+  WHERE NOT (r.first_seq = s.first_seq AND coalesce(r.backfill_last_seq = s.last_seq, false))
     AND r.first_seq <= s.last_seq
     AND coalesce(r.last_seq, 2147483647) >= s.first_seq
-  ORDER BY s.system, p.name, s.attr_path
+  ORDER BY s.system, p.name, va.attr_path
   LIMIT 5
 `;
 
@@ -385,19 +450,41 @@ export const INSERT_BACKFILL_VARIANTS = `
   WHERE variants.commit_seq < EXCLUDED.commit_seq
 `;
 
-/** Pulls back the start of a live range that the staged one runs into. */
+/**
+ * Pulls back the start of a range that the staged one runs into: the
+ * forward import's live range, or an earlier backfill's from a later
+ * window. The backfilled part then runs through the staged range's end,
+ * unless it already ran further.
+ */
 export const EXTEND_BACKFILL_RANGES = `
-  UPDATE variant_ranges r SET first_seq = s.first_seq
-  FROM stage_backfill_ranges s
-  ${BACKFILL_RANGE_VARIANT}
-  WHERE r.variant_id = va.id AND NOT r.seeded AND r.first_seq = s.next_seq
+  UPDATE variant_ranges r SET
+    first_seq = s.first_seq,
+    backfill_last_seq = coalesce(r.backfill_last_seq, s.last_seq)
+  FROM backfill_ranges s
+  WHERE r.variant_id = s.variant_id AND NOT r.seeded AND r.first_seq = s.next_seq
 `;
 
-/** Every other staged range, closed. A rerun conflicts and writes nothing. */
+/**
+ * Every other staged range, closed and marked as backfilled. What conflicts
+ * here is a range this backfill already wrote (an identical rerun, or one
+ * just extended to start there); the overlap check has refused anything
+ * else that isn't seeded.
+ */
 export const INSERT_BACKFILL_RANGES = `
-  INSERT INTO variant_ranges (variant_id, first_seq, last_seq, seeded)
-  SELECT va.id, s.first_seq, s.last_seq, false
-  FROM stage_backfill_ranges s
-  ${BACKFILL_RANGE_VARIANT}
+  INSERT INTO variant_ranges (variant_id, first_seq, last_seq, seeded, backfill_last_seq)
+  SELECT s.variant_id, s.first_seq, s.last_seq, false, s.last_seq
+  FROM backfill_ranges s
   ON CONFLICT (variant_id, first_seq) DO NOTHING
+`;
+
+/**
+ * The imported commits a backfill window covers, with the systems each was
+ * imported for: what backfill-list hands the eval matrix, and what the
+ * backfill expects an eval of. $1 since (date), $2 through seq, $3 systems.
+ */
+export const BACKFILL_COMMITS = `
+  SELECT c.seq, c.hash, array_agg(cs.system ORDER BY cs.system) AS systems
+  FROM commits c JOIN commit_systems cs ON cs.commit_seq = c.seq AND cs.system = ANY($3)
+  WHERE c.committed_at >= $1 AND c.seq <= $2
+  GROUP BY c.seq, c.hash ORDER BY c.seq
 `;

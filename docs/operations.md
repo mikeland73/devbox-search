@@ -59,9 +59,21 @@ gh workflow run backfill.yml -f since=2025-10-01 -f through_seq=<seq> -f dry_run
   less than the first live range of a package that has one only because
   of it (the workflow header has the query). A window that reaches into
   commits already imported with those rows is refused, not merged.
-- A failed eval leaves a gap the ranges bridge, the way the forward import
-  closes a range at the previous imported seq. Re-running the same window
-  writes nothing, so re-dispatching after a partial failure is safe.
+- A failed fetch or eval fails its batch, and the import then refuses to
+  write anything: a missing eval is bridged, which can leave a range too
+  long (across a commit the package was absent from) or not joined to the
+  forward import's. Re-run the failed jobs, or the workflow. The CLI makes
+  the same check per commit and system, so a hand-run `cli.js backfill`
+  refuses too.
+- `-f allow_failed_evals=true` (`--allow-failed-evals`) imports anyway. A
+  later run of the same window with every eval repairs what it wrote: ranges
+  a backfill wrote are marked (`variant_ranges.backfill_last_seq`), and
+  within the window a rerun's evals replace them. The forward import's
+  ranges are never replaced; overlapping one is still refused.
+- Re-running the same window with the same evals writes nothing. Re-run
+  with the same `since` and `through_seq` as before: once a backfill has
+  extended the live ranges, the header's `through_seq` query no longer gives
+  the original value.
 - A year is ~377 commits: 38 batches of 10, ~10 min each, 20 at a time.
 
 ### Reading the numbers

@@ -18,7 +18,7 @@ import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { migrationStatements, REFRESH_ROW_COUNTS } from "@devbox-search/db";
 import { evalRows } from "./import.js";
-import { applyBackfill, planBackfill, type BackfillDb, type BackfillEval } from "./backfill.js";
+import { applyBackfill, assertEvalsComplete, planBackfill, type BackfillDb, type BackfillEval } from "./backfill.js";
 import { packageKey, toVersionRow } from "./seedTransform.js";
 import * as SQL from "./importSql.js";
 
@@ -671,7 +671,14 @@ describe("backfill (hidden-only evals of already-imported commits)", () => {
     await backfill(evals);
     const before = await rangesOf("gitwatch");
     const again = await backfill(evals);
-    expect(again).toEqual({ newPackages: 0, newVersions: 0, newVariants: 0, rangesExtended: 0, rangesInserted: 0 });
+    expect(again).toEqual({
+      newPackages: 0,
+      newVersions: 0,
+      newVariants: 0,
+      rangesReplaced: 0,
+      rangesExtended: 0,
+      rangesInserted: 0,
+    });
     expect(await rangesOf("gitwatch")).toEqual(before);
   });
 
@@ -690,5 +697,144 @@ describe("backfill (hidden-only evals of already-imported commits)", () => {
       backfill([hiddenEval(3, { gitwatch: { version: "0.6" } }), hiddenEval(4, { gitwatch: { version: "0.6" } })]),
     ).rejects.toThrow(/overlaps ranges the forward import already wrote/);
     expect(await rangesOf("gitwatch")).toEqual([{ version: "0.6", first_seq: 4, last_seq: null, commit_seq: 4 }]);
+  });
+
+  describe("a partial run, repaired by re-running with every eval", () => {
+    // The window is seqs 1-6, evaluated in batches of two; the fixed eval
+    // landed at seq 7. What each hidden-only eval really lists:
+    const TRUTH: Record<number, Record<string, { version: string }>> = {
+      1: { gitwatch: { version: "0.4" }, tool: { version: "1" } },
+      2: { gitwatch: { version: "0.4" }, tool: { version: "1" }, oldtool: { version: "A1" } },
+      // tool and oldtool are absent here: a batch failing over seq 3 must
+      // not leave them bridged across it once repaired.
+      3: { gitwatch: { version: "0.6" } },
+      4: { gitwatch: { version: "0.6" }, tool: { version: "1" } },
+      5: { gitwatch: { version: "0.6" }, tool: { version: "1" }, oldtool: { version: "A1" } },
+      6: { gitwatch: { version: "0.6" }, tool: { version: "1" } },
+    };
+    const evalsOf = (seqs: number[]) => seqs.map((seq) => hiddenEval(seq, TRUTH[seq]!));
+    const ALL = [1, 2, 3, 4, 5, 6];
+
+    async function setup() {
+      await forward(8, 7, { gitwatch: { version: "0.6" }, tool: { version: "1" } });
+    }
+
+    /** Every range and variant row, including which part a backfill wrote. */
+    async function snapshot() {
+      return {
+        ranges: await rows(
+          `SELECT va.attr_path, v.version, r.first_seq, r.last_seq, r.backfill_last_seq
+           FROM variant_ranges r JOIN variants va ON va.id = r.variant_id JOIN versions v ON v.id = va.version_id
+           ORDER BY va.attr_path, v.version, r.first_seq`,
+        ),
+        variants: await rows(
+          `SELECT va.attr_path, v.version, va.store_hash, va.commit_seq, va.content_hash
+           FROM variants va JOIN versions v ON v.id = va.version_id ORDER BY va.attr_path, v.version`,
+        ),
+      };
+    }
+
+    async function cleanRun() {
+      await setup();
+      await backfill(evalsOf(ALL));
+      return snapshot();
+    }
+
+    test("a clean run gives the true history", async () => {
+      await setup();
+      await backfill(evalsOf(ALL));
+      expect((await rangesOf("gitwatch")).map((r) => [r.version, r.first_seq, r.last_seq])).toEqual([
+        ["0.4", 1, 2],
+        ["0.6", 3, null],
+      ]);
+      expect((await rangesOf("tool")).map((r) => [r.first_seq, r.last_seq])).toEqual([
+        [1, 2],
+        [4, null],
+      ]);
+      expect((await rangesOf("oldtool")).map((r) => [r.first_seq, r.last_seq])).toEqual([
+        [2, 2],
+        [5, 5],
+      ]);
+    });
+
+    test("the tail batch failing, then a full rerun, converges to the clean run", async () => {
+      const clean = await cleanRun();
+      await db.close();
+      db = await PGlite.create({ extensions: { pg_trgm } });
+      for (const statement of migrationStatements()) await db.exec(statement);
+
+      await setup();
+      // Seqs 5-6 missing: the runs close at 4, which doesn't abut seq 7.
+      await backfill(evalsOf([1, 2, 3, 4]));
+      expect((await rangesOf("gitwatch")).map((r) => [r.first_seq, r.last_seq])).toEqual([
+        [1, 2],
+        [3, 4],
+        [7, null],
+      ]);
+      await backfill(evalsOf(ALL));
+      expect(await snapshot()).toEqual(clean);
+      // And from there, the same rerun writes nothing.
+      expect(await backfill(evalsOf(ALL))).toEqual({
+        newPackages: 0,
+        newVersions: 0,
+        newVariants: 0,
+        rangesReplaced: 0,
+        rangesExtended: 0,
+        rangesInserted: 0,
+      });
+      expect(await snapshot()).toEqual(clean);
+    });
+
+    test("a middle batch failing, then a full rerun, converges to the clean run", async () => {
+      const clean = await cleanRun();
+      await db.close();
+      db = await PGlite.create({ extensions: { pg_trgm } });
+      for (const statement of migrationStatements()) await db.exec(statement);
+
+      await setup();
+      // Seqs 3-4 missing: tool is bridged into the live range from seq 1,
+      // oldtool into one closed range 2..5.
+      await backfill(evalsOf([1, 2, 5, 6]));
+      expect((await rangesOf("tool")).map((r) => [r.first_seq, r.last_seq])).toEqual([[1, null]]);
+      expect((await rangesOf("oldtool")).map((r) => [r.first_seq, r.last_seq])).toEqual([[2, 5]]);
+      await backfill(evalsOf(ALL));
+      expect(await snapshot()).toEqual(clean);
+    });
+
+    test("a rerun that overlaps a range the forward import wrote is still refused", async () => {
+      await setup();
+      await backfill(evalsOf([1, 2, 3, 4]));
+      const before = await snapshot();
+      // seq 7 was imported with the fixed eval: through-seq too high.
+      await expect(
+        backfill([...evalsOf(ALL), hiddenEval(7, { gitwatch: { version: "0.6" }, tool: { version: "1" } })]),
+      ).rejects.toThrow(/overlaps ranges the forward import already wrote/);
+      expect(await snapshot()).toEqual(before);
+    });
+
+    test("a dry-run repair rolls back", async () => {
+      await setup();
+      await backfill(evalsOf([1, 2, 5, 6]));
+      const before = await snapshot();
+      const imported = new Map([[SYSTEM, [1, 2, 3, 4, 5, 6, 7, 8]]]);
+      await applyBackfill(pgliteDb, planBackfill(evalsOf(ALL), imported), () => {}, { dryRun: true });
+      expect(await snapshot()).toEqual(before);
+    });
+
+    test("the gate refuses a window with missing evals unless allowed", async () => {
+      await setup();
+      const expected = await rows<{ seq: number; hash: string; systems: string[] }>(SQL.BACKFILL_COMMITS, [
+        DAY(1),
+        6,
+        [SYSTEM],
+      ]);
+      expect(expected.map((r) => r.seq)).toEqual(ALL);
+      const evals = evalsOf([1, 2, 3, 4]);
+      expect(() => assertEvalsComplete(expected, evals)).toThrow(
+        /2 of 6 expected evals are missing[\s\S]*seq 5\/x86_64-linux[\s\S]*--allow-failed-evals/,
+      );
+      expect(() => assertEvalsComplete(expected, evals, { allowFailedEvals: true })).not.toThrow();
+      expect(() => assertEvalsComplete(expected, evalsOf(ALL))).not.toThrow();
+    });
   });
 });

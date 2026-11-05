@@ -50,6 +50,13 @@
       "when": 1790317690401,
       "tag": "0006_row_counts",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793915327063,
+      "tag": "0007_variant_ranges_backfill_last_seq",
+      "breakpoints": true
     }
   ]
 }

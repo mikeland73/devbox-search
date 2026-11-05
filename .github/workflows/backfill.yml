@@ -16,11 +16,20 @@
 #   JOIN variants va ON va.id = r.variant_id
 #   WHERE va.attr_path = 'makeWrapper' AND NOT r.seeded;
 #
+# (Before the first backfill: it extends that range back. Re-run with the
+# same since and through_seq as the first run.)
+#
 # plan lists the imported commits in the window; eval runs the hidden-only
 # expression (`eval.nix --arg hiddenOnly true`, ~15 s and ~3 GB per system)
-# for batches of them; import writes the history in one transaction. A
-# failed eval is a gap the importer bridges, not an absence. Re-running the
-# same window writes nothing; a through_seq that is too high is refused.
+# for batches of them; import writes the history in one transaction.
+#
+# A failed fetch or eval fails its batch, and the import refuses to write
+# while any (commit, system) in the window lacks an eval: the importer would
+# bridge the gap, which can leave ranges too long or not joined to the live
+# one. Re-run the workflow (or the failed jobs). -f allow_failed_evals=true
+# imports anyway; a later run with every eval repairs what it wrote.
+# Re-running the same window writes nothing; a through_seq that is too high
+# is refused.
 name: backfill
 
 on:
@@ -36,6 +45,10 @@ on:
         description: "Run every check and count against the database, then roll back"
         type: boolean
         default: true
+      allow_failed_evals:
+        description: "Import even if some evals failed, bridging the gaps (a later full run repairs them)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -95,6 +108,7 @@ jobs:
       - name: Evaluate
         env:
           COMMITS: ${{ matrix.commits }}
+          BATCH: ${{ matrix.batch }}
         run: |
           set -o pipefail
           mkdir out
@@ -119,15 +133,23 @@ jobs:
                 mv "$out.tmp" "$out"
                 echo "$hash $system: $(gzip -dc "$out" | jq length) entries"
               else
-                # A gap, not an absence: the importer bridges it.
+                # A gap, not an absence: the import refuses it unless allowed.
                 rm -f "$out.tmp"; tail -5 err.log
                 echo "::warning::eval of $hash/$system failed"; failed=$(( failed + 1 ))
               fi
             done
           done
           echo "failed: $failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Recorded for the import's gate, and fails the batch.
+          echo "$failed" > "out/failed-$BATCH.txt"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::$failed evals failed in batch $BATCH"; exit 1
+          fi
 
+      # The evals that did succeed, even when some failed: allow_failed_evals
+      # imports them, and re-running just the failed jobs keeps the rest.
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: backfill-${{ matrix.batch }}
           path: out
@@ -136,7 +158,8 @@ jobs:
 
   import:
     needs: [plan, eval]
-    # Whatever evaluated is worth importing; failed batches are gaps.
+    # Runs even when evals failed, to fail loudly in the gate below (or, with
+    # allow_failed_evals, import what did evaluate).
     if: always() && needs.plan.result == 'success' && needs.plan.outputs.count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -157,14 +180,41 @@ jobs:
         with:
           pattern: backfill-*
           path: evals
+      # Before anything touches the database. The CLI checks again, per
+      # (commit, system), against the window itself.
+      - name: Gate on failed evals
+        env:
+          EVAL_RESULT: ${{ needs.eval.result }}
+          BATCHES: ${{ needs.plan.outputs.batches }}
+          ALLOW_FAILED_EVALS: ${{ inputs.allow_failed_evals }}
+        run: |
+          expected=$(jq length <<< "$BATCHES")
+          reported=0; failed=0
+          for f in evals/*/failed-*.txt; do
+            [ -f "$f" ] || continue
+            reported=$(( reported + 1 )); failed=$(( failed + $(cat "$f") ))
+          done
+          echo "eval: $EVAL_RESULT; $failed failed evals; $(( expected - reported )) of $expected batches without a report" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$EVAL_RESULT" != "success" ] || [ "$failed" -ne 0 ] || [ "$reported" -ne "$expected" ]; then
+            if [ "$ALLOW_FAILED_EVALS" = "true" ]; then
+              echo "::warning::importing with failed evals (allow_failed_evals); a full rerun repairs the gaps"
+            else
+              echo "::error::evals failed; re-run them, or dispatch with allow_failed_evals=true to bridge the gaps"
+              exit 1
+            fi
+          fi
       - name: Backfill
         env:
           DATABASE_URL_DIRECT: ${{ secrets.DATABASE_URL_DIRECT }}
+          SINCE: ${{ inputs.since }}
           THROUGH_SEQ: ${{ inputs.through_seq }}
           DRY_RUN: ${{ inputs.dry_run }}
+          ALLOW_FAILED_EVALS: ${{ inputs.allow_failed_evals }}
         run: |
-          args=(--dir evals --through-seq "$THROUGH_SEQ")
+          args=(--dir evals --since "$SINCE" --through-seq "$THROUGH_SEQ" --systems "${SYSTEMS// /,}")
           if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ "$ALLOW_FAILED_EVALS" = "true" ]; then args+=(--allow-failed-evals); fi
           node packages/indexer/dist/cli.js backfill "${args[@]}"
       - name: Summary
         if: always()

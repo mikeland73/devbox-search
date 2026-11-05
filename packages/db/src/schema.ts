@@ -268,6 +268,15 @@ export const variantRanges = pgTable(
       .references(() => commits.seq),
     lastSeq: integer("last_seq").references(() => commits.seq),
     seeded: boolean("seeded").notNull().default(false),
+    /**
+     * Set when a backfill (indexer backfill.ts) wrote seqs firstSeq through
+     * this value; null for everything else. A range a backfill wrote whole
+     * has it equal to lastSeq; a forward-import range a backfill extended
+     * back has the forward part start at the system's next imported seq
+     * after it. Lets a rerun replace an earlier backfill's ranges without
+     * touching the forward import's.
+     */
+    backfillLastSeq: integer("backfill_last_seq"),
   },
   (t) => [
     primaryKey({ columns: [t.variantId, t.firstSeq] }),

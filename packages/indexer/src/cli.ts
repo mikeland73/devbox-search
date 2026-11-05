@@ -8,8 +8,10 @@
  *   cli.js import --dir evals     import every archived eval in a directory
  *   cli.js backfill-list --since 2025-10-01 --through-seq N --systems a,b,c
  *                                 imported commits to re-evaluate hidden-only (GH output)
- *   cli.js backfill --dir evals --through-seq N [--dry-run]
- *                                 write history from hidden-only evals (backfill.ts)
+ *   cli.js backfill --dir evals --since 2025-10-01 --through-seq N --systems a,b,c
+ *                   [--dry-run] [--allow-failed-evals]
+ *                                 write history from hidden-only evals (backfill.ts);
+ *                                 refuses if any commit/system in the window lacks one
  *   cli.js status                 a markdown summary of the index
  */
 
@@ -17,10 +19,17 @@ import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { createImportClient } from "@devbox-search/db";
 import { DEFAULT_LIMIT, listUnstableReleases, resolveCommit, selectPendingForCommits, withBackfill } from "./discover.js";
-import { INCOMPLETE_COMMITS } from "./importSql.js";
+import { BACKFILL_COMMITS, INCOMPLETE_COMMITS } from "./importSql.js";
 import { evaluate } from "./evaluate.js";
 import { evalRows, importEval } from "./import.js";
-import { applyBackfill, planBackfill, type BackfillDb, type BackfillEval } from "./backfill.js";
+import {
+  applyBackfill,
+  assertEvalsComplete,
+  planBackfill,
+  type BackfillDb,
+  type BackfillEval,
+  type ExpectedCommit,
+} from "./backfill.js";
 import { copyRows } from "./copy.js";
 import { readEvalArchive } from "./readEval.js";
 
@@ -186,6 +195,13 @@ async function cmdImport(): Promise<void> {
 }
 
 /** --through-seq as a positive integer, or exit. */
+function backfillSystems(): string[] {
+  return requireArg("systems")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+}
+
 function throughSeq(): number {
   const raw = requireArg("through-seq");
   const n = Number(raw);
@@ -204,17 +220,11 @@ function throughSeq(): number {
 async function cmdBackfillList(): Promise<void> {
   const since = requireArg("since");
   const through = throughSeq();
-  const systems = requireArg("systems").split(",").map((s) => s.trim()).filter((s) => s !== "");
+  const systems = backfillSystems();
   const batchSize = Number(arg("batch-size") ?? "10");
   const { pool } = createImportClient();
   try {
-    const { rows } = await pool.query<{ seq: number; hash: string; systems: string[] }>(
-      `SELECT c.seq, c.hash, array_agg(cs.system ORDER BY cs.system) AS systems
-       FROM commits c JOIN commit_systems cs ON cs.commit_seq = c.seq AND cs.system = ANY($3)
-       WHERE c.committed_at >= $1 AND c.seq <= $2
-       GROUP BY c.seq, c.hash ORDER BY c.seq`,
-      [since, through, systems],
-    );
+    const { rows } = await pool.query<ExpectedCommit>(BACKFILL_COMMITS, [since, through, systems]);
     const batches = [];
     for (let i = 0; i < rows.length; i += batchSize) {
       const commits = rows.slice(i, i + batchSize).map((r) => `${r.hash}=${r.systems.join(",")}`);
@@ -239,10 +249,18 @@ async function cmdBackfillList(): Promise<void> {
  * (eval.nix --arg hiddenOnly true). Each commit must already be imported for
  * that system, at or before --through-seq: the last seq imported before the
  * eval passed hidden versions.
+ *
+ * --since, --through-seq and --systems are backfill-list's: every commit and
+ * system it listed must have an eval here, or the run is refused before
+ * anything is written. --allow-failed-evals accepts the gaps (bridged, so
+ * possibly wrong until a rerun with every eval).
  */
 async function cmdBackfill(): Promise<void> {
   const dir = requireArg("dir");
+  const since = requireArg("since");
   const through = throughSeq();
+  const systems = backfillSystems();
+  const allowFailedEvals = process.argv.includes("--allow-failed-evals");
   const files: Array<{ path: string; system: string; commit: string }> = [];
   for (const entry of existsSync(dir) ? readdirSync(dir, { recursive: true, encoding: "utf8" }) : []) {
     const m = /^hidden-([0-9a-z_-]+)-([0-9a-f]{40})\.json\.gz$/.exec(basename(entry));
@@ -277,6 +295,11 @@ async function cmdBackfill(): Promise<void> {
       }
       const rows = evalRows(await readEvalArchive(f.path), f.commit, commit.committed_at, f.system);
       evals.push({ system: f.system, seq: commit.seq, rows });
+    }
+    const expected = await client.query<ExpectedCommit>(BACKFILL_COMMITS, [since, through, systems]);
+    const missing = assertEvalsComplete(expected.rows, evals, { allowFailedEvals });
+    if (missing.length > 0) {
+      console.log(`::warning::${missing.length} expected evals missing; bridging them (--allow-failed-evals)`);
     }
     for (const system of [...new Set(evals.map((e) => e.system))].sort()) {
       const seqs = evals.filter((e) => e.system === system).map((e) => e.seq);

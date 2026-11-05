@@ -28,6 +28,16 @@
  * An existing variant keeps its row unless the backfill saw it later (a
  * seed-era row). Re-running the same backfill writes nothing; a window that
  * reaches into commits already imported with these rows is refused.
+ *
+ * A failed eval is a gap the plan bridges, so a run with evals missing
+ * writes ranges that are too long (bridged over a commit the package was
+ * absent from) or too short (closed before a failed tail batch, so not
+ * joined to the live range). assertEvalsComplete refuses such a run unless
+ * the operator accepts the gaps. If they do, a rerun with every eval
+ * repairs it: the ranges a backfill writes are marked
+ * (variant_ranges.backfill_last_seq), and within the window a rerun's
+ * evals replace an earlier backfill's ranges rather than colliding with
+ * them. The forward import's ranges are never replaced.
  */
 
 import type { CopyValue } from "./copy.js";
@@ -62,9 +72,54 @@ export interface BackfillRange {
   nextSeq: number | null;
 }
 
+/** The first and last seq a system has an eval of. */
+export interface BackfillWindow {
+  system: string;
+  firstSeq: number;
+  lastSeq: number;
+}
+
 export interface BackfillPlan {
   variants: BackfillVariant[];
   ranges: BackfillRange[];
+  windows: BackfillWindow[];
+}
+
+/** An imported commit the backfill window covers, with its systems (SQL.BACKFILL_COMMITS). */
+export interface ExpectedCommit {
+  seq: number;
+  hash: string;
+  systems: string[];
+}
+
+/**
+ * Refuses a backfill missing an eval of any (commit, system) its window
+ * covers, unless `allowFailedEvals`: a missing eval is bridged, so the
+ * ranges around it could be wrong (see the top of this file). A rerun with
+ * every eval repairs what an allowed run wrote.
+ */
+export function assertEvalsComplete(
+  expected: ExpectedCommit[],
+  evals: BackfillEval[],
+  options: { allowFailedEvals?: boolean } = {},
+): Array<{ seq: number; hash: string; system: string }> {
+  const have = new Set(evals.map((e) => `${e.seq}\t${e.system}`));
+  const missing = expected.flatMap((c) =>
+    c.systems.filter((system) => !have.has(`${c.seq}\t${system}`)).map((system) => ({ seq: c.seq, hash: c.hash, system })),
+  );
+  if (missing.length > 0 && options.allowFailedEvals !== true) {
+    const total = expected.reduce((n, c) => n + c.systems.length, 0);
+    throw new Error(
+      `refusing backfill: ${missing.length} of ${total} expected evals are missing, e.g.\n` +
+        missing
+          .slice(0, 10)
+          .map((m) => `  seq ${m.seq}/${m.system} (${m.hash.slice(0, 12)})`)
+          .join("\n") +
+        `\nRe-run the failed evals, or pass --allow-failed-evals to bridge the gaps; a later run with ` +
+        `every eval repairs them.`,
+    );
+  }
+  return missing;
 }
 
 /**
@@ -93,6 +148,7 @@ export function planBackfill(evals: BackfillEval[], importedSeqs: Map<string, nu
   }
   const variants: BackfillVariant[] = [];
   const ranges: BackfillRange[] = [];
+  const windows: BackfillWindow[] = [];
 
   const bySystem = new Map<string, BackfillEval[]>();
   for (const e of evals) {
@@ -124,6 +180,7 @@ export function planBackfill(evals: BackfillEval[], importedSeqs: Map<string, nu
     };
 
     const sorted = [...systemEvals].sort((a, b) => a.seq - b.seq);
+    windows.push({ system, firstSeq: sorted[0]!.seq, lastSeq: sorted[sorted.length - 1]!.seq });
     for (let i = 0; i < sorted.length; i++) {
       const { seq, rows } = sorted[i]!;
       if (i > 0 && sorted[i - 1]!.seq === seq) throw new Error(`two evals of seq ${seq}/${system}`);
@@ -155,7 +212,7 @@ export function planBackfill(evals: BackfillEval[], importedSeqs: Map<string, nu
     for (const [key, run] of open) close(key, run);
     for (const run of latest.values()) variants.push({ system, commitSeq: run.contentSeq, row: run.row });
   }
-  return { variants, ranges };
+  return { variants, ranges, windows };
 }
 
 /**
@@ -172,13 +229,15 @@ export interface BackfillResult {
   newVersions: number;
   /** Inserted, or updated from an older seed-era row. */
   newVariants: number;
+  /** An earlier backfill's ranges in this window that this one's evals replaced. */
+  rangesReplaced: number;
   rangesExtended: number;
   rangesInserted: number;
 }
 
 /**
- * Writes a plan in one transaction. Throws, having written nothing, on an
- * overlap. `dryRun` rolls back instead of committing, after every check and
+ * Writes a plan in one transaction. Throws, having written nothing (it
+ * rolls back), on an overlap. `dryRun` rolls back instead of committing, after every check and
  * count has run against the real data.
  */
 export async function applyBackfill(
@@ -208,14 +267,12 @@ export async function applyBackfill(
       SQL.STAGE_BACKFILL_RANGES_COLUMNS,
       plan.ranges.map((r) => [r.system, r.nameKey, r.version, r.attrPath, r.firstSeq, r.lastSeq, r.nextSeq]),
     );
-    const overlaps = await db.query<Record<string, unknown>>(SQL.BACKFILL_OVERLAPS);
-    if (overlaps.rows.length > 0) {
-      throw new Error(
-        `refusing backfill: it overlaps ranges the forward import already wrote, so --through-seq ` +
-          `reaches into commits imported with these rows. e.g.\n` +
-          overlaps.rows.map((r) => `  ${JSON.stringify(r)}`).join("\n"),
-      );
-    }
+    await db.query(SQL.STAGE_BACKFILL_WINDOWS_DDL);
+    await db.stage(
+      "stage_backfill_windows",
+      SQL.STAGE_BACKFILL_WINDOWS_COLUMNS,
+      plan.windows.map((w) => [w.system, w.firstSeq, w.lastSeq]),
+    );
 
     const newPackages = (await db.query(SQL.INSERT_PACKAGES)).count;
     const missingVersions = await db.query<{ name_key: string; version: string }>(SQL.MISSING_VERSIONS);
@@ -278,6 +335,21 @@ export async function applyBackfill(
     );
     const newVariants = (await db.query(SQL.INSERT_BACKFILL_VARIANTS)).count;
 
+    // Ranges: replace what an earlier, partial backfill left in this
+    // window, then refuse anything that still overlaps, then write.
+    await db.query(SQL.RESOLVE_BACKFILL_RANGES);
+    const rangesReplaced =
+      (await db.query(SQL.DELETE_STALE_BACKFILL_RANGES)).count +
+      (await db.query(SQL.UNEXTEND_STALE_BACKFILL_RANGES)).count;
+    const overlaps = await db.query<Record<string, unknown>>(SQL.BACKFILL_OVERLAPS);
+    if (overlaps.rows.length > 0) {
+      throw new Error(
+        `refusing backfill: it overlaps ranges the forward import already wrote, so --through-seq ` +
+          `reaches into commits imported with these rows, or an earlier backfill's that run past ` +
+          `this window. e.g.\n` +
+          overlaps.rows.map((r) => `  ${JSON.stringify(r)}`).join("\n"),
+      );
+    }
     const rangesExtended = (await db.query(SQL.EXTEND_BACKFILL_RANGES)).count;
     const rangesInserted = (await db.query(SQL.INSERT_BACKFILL_RANGES)).count;
 
@@ -285,7 +357,7 @@ export async function applyBackfill(
     await db.query(REFRESH_ROW_COUNTS);
     await db.query(options.dryRun === true ? "ROLLBACK" : "COMMIT");
 
-    const result = { newPackages, newVersions, newVariants, rangesExtended, rangesInserted };
+    const result = { newPackages, newVersions, newVariants, rangesReplaced, rangesExtended, rangesInserted };
     log(
       `backfill${options.dryRun === true ? " (dry run, rolled back)" : ""}: ${JSON.stringify(result)} ` +
         `from ${plan.variants.length} variants, ${plan.ranges.length} ranges`,
