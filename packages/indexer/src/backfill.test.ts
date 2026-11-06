@@ -81,4 +81,15 @@ describe("assertEvalsComplete", () => {
       { seq: 11, hash: "2".repeat(40), system: SYSTEM },
     ]);
   });
+
+  test("refuses an eval of a system outside the window, even with the override", () => {
+    const other = { ...evalOf(11, []), system: "riscv64-linux" };
+    for (const allowFailedEvals of [false, true]) {
+      expect(() =>
+        assertEvalsComplete(expected, [evalOf(10, []), withOther(evalOf(10, [])), evalOf(11, []), other], {
+          allowFailedEvals,
+        }),
+      ).toThrow(/1 eval is outside the window[\s\S]*seq 11\/riscv64-linux/);
+    }
+  });
 });

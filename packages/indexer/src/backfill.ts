@@ -97,12 +97,30 @@ export interface ExpectedCommit {
  * covers, unless `allowFailedEvals`: a missing eval is bridged, so the
  * ranges around it could be wrong (see the top of this file). A rerun with
  * every eval repairs what an allowed run wrote.
+ *
+ * Always refuses an eval outside the window (before --since, or of a system
+ * not in --systems), such as a leftover archive in a reused directory: it
+ * would write history outside the window, and widen the window in which
+ * an earlier backfill's ranges are replaced.
  */
 export function assertEvalsComplete(
   expected: ExpectedCommit[],
-  evals: BackfillEval[],
+  evals: Array<Pick<BackfillEval, "seq" | "system">>,
   options: { allowFailedEvals?: boolean } = {},
 ): Array<{ seq: number; hash: string; system: string }> {
+  const want = new Set(expected.flatMap((c) => c.systems.map((system) => `${c.seq}\t${system}`)));
+  const extra = evals.filter((e) => !want.has(`${e.seq}\t${e.system}`));
+  if (extra.length > 0) {
+    throw new Error(
+      `refusing backfill: ${extra.length} ${extra.length === 1 ? "eval is" : "evals are"} outside the window ` +
+        `(before --since, or a system not in --systems), e.g.\n` +
+        extra
+          .slice(0, 10)
+          .map((e) => `  seq ${e.seq}/${e.system}`)
+          .join("\n") +
+        `\nRemove those archives, or widen --since/--systems to cover them.`,
+    );
+  }
   const have = new Set(evals.map((e) => `${e.seq}\t${e.system}`));
   const missing = expected.flatMap((c) =>
     c.systems.filter((system) => !have.has(`${c.seq}\t${system}`)).map((system) => ({ seq: c.seq, hash: c.hash, system })),
@@ -229,7 +247,10 @@ export interface BackfillResult {
   newVersions: number;
   /** Inserted, or updated from an older seed-era row. */
   newVariants: number;
-  /** An earlier backfill's ranges in this window that this one's evals replaced. */
+  /**
+   * An earlier backfill's ranges in this window that this one's evals
+   * replaced, and seed-era point ranges its ranges cover.
+   */
   rangesReplaced: number;
   rangesExtended: number;
   rangesInserted: number;
@@ -340,7 +361,8 @@ export async function applyBackfill(
     await db.query(SQL.RESOLVE_BACKFILL_RANGES);
     const rangesReplaced =
       (await db.query(SQL.DELETE_STALE_BACKFILL_RANGES)).count +
-      (await db.query(SQL.UNEXTEND_STALE_BACKFILL_RANGES)).count;
+      (await db.query(SQL.UNEXTEND_STALE_BACKFILL_RANGES)).count +
+      (await db.query(SQL.DELETE_COVERED_SEEDED_RANGES)).count;
     const overlaps = await db.query<Record<string, unknown>>(SQL.BACKFILL_OVERLAPS);
     if (overlaps.rows.length > 0) {
       throw new Error(

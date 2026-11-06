@@ -376,6 +376,21 @@ export const DELETE_STALE_BACKFILL_RANGES = `
 `;
 
 /**
+ * A seed-era point range (seed.ts: seeded, at the variant's last content
+ * change) inside a staged range: the real range covers it, and one starting
+ * at the same seq would otherwise collide on (variant_id, first_seq), so
+ * the insert would drop the real range or the extend would abort the run.
+ */
+export const DELETE_COVERED_SEEDED_RANGES = `
+  DELETE FROM variant_ranges r
+  WHERE r.seeded
+    AND EXISTS (
+      SELECT 1 FROM backfill_ranges s
+      WHERE s.variant_id = r.variant_id AND s.first_seq <= r.first_seq AND r.first_seq <= s.last_seq
+    )
+`;
+
+/**
  * A forward-import range a stale backfill extended goes back to where the
  * forward import started it: the system's next imported seq after the
  * backfilled part (extension only ever joins a run to the range starting
@@ -422,6 +437,12 @@ export const BACKFILL_OVERLAPS = `
  * later: the forward import's rows are always newer than the window, but a
  * seed-era row (the old service listed a few of these packages) can be
  * older, with a store path nixpkgs has since rebuilt.
+ *
+ * Unchanged content moves commit_seq back to the earliest seq the backfill
+ * saw it at, which is where that content first appeared: a seed-era row is
+ * dated at its last change, and an allowed partial run dates content from
+ * the first eval it had. The content hash covers every other column, so
+ * only commit_seq changes. Identical reruns match on both and write nothing.
  */
 export const INSERT_BACKFILL_VARIANTS = `
   INSERT INTO variants (
@@ -448,6 +469,7 @@ export const INSERT_BACKFILL_VARIANTS = `
     outputs = EXCLUDED.outputs,
     content_hash = EXCLUDED.content_hash
   WHERE variants.commit_seq < EXCLUDED.commit_seq
+     OR (variants.content_hash = EXCLUDED.content_hash AND EXCLUDED.commit_seq < variants.commit_seq)
 `;
 
 /**
@@ -467,8 +489,8 @@ export const EXTEND_BACKFILL_RANGES = `
 /**
  * Every other staged range, closed and marked as backfilled. What conflicts
  * here is a range this backfill already wrote (an identical rerun, or one
- * just extended to start there); the overlap check has refused anything
- * else that isn't seeded.
+ * just extended to start there): the overlap check has refused anything
+ * else, and seeded points in the way are gone.
  */
 export const INSERT_BACKFILL_RANGES = `
   INSERT INTO variant_ranges (variant_id, first_seq, last_seq, seeded, backfill_last_seq)

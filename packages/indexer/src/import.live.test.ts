@@ -699,6 +699,68 @@ describe("backfill (hidden-only evals of already-imported commits)", () => {
     expect(await rangesOf("gitwatch")).toEqual([{ version: "0.6", first_seq: 4, last_seq: null, commit_seq: 4 }]);
   });
 
+  describe("seed-era point ranges", () => {
+    /**
+     * What seed.ts writes: the variant dated at its last content change,
+     * with a point range there. `replace` drops the variant's other ranges.
+     */
+    async function seedPoint(attrPath: string, seq: number, replace = true) {
+      if (replace) {
+        await db.query(
+          `DELETE FROM variant_ranges r USING variants va WHERE va.id = r.variant_id AND va.attr_path = $1`,
+          [attrPath],
+        );
+      }
+      await db.query(`UPDATE variants SET commit_seq = $2 WHERE attr_path = $1`, [attrPath, seq]);
+      await db.query(
+        `INSERT INTO variant_ranges (variant_id, first_seq, last_seq, seeded)
+         SELECT id, $2, $2, true FROM variants WHERE attr_path = $1`,
+        [attrPath, seq],
+      );
+    }
+
+    async function seededRangesOf(attrPath: string) {
+      return rows<{ first_seq: number; last_seq: number | null; seeded: boolean }>(
+        `SELECT r.first_seq, r.last_seq, r.seeded FROM variant_ranges r JOIN variants va ON va.id = r.variant_id
+         WHERE va.attr_path = $1 ORDER BY r.first_seq, r.seeded`,
+        [attrPath],
+      );
+    }
+
+    test("a closed run starting at a seeded point replaces it rather than being dropped", async () => {
+      await forward(1, 1, { tool: { version: "1" } });
+      await forward(4);
+      await seedPoint("tool", 2);
+      const result = await backfill([hiddenEval(2, { tool: { version: "1" } }), hiddenEval(3, { tool: { version: "1" } })]);
+      expect(await seededRangesOf("tool")).toEqual([{ first_seq: 2, last_seq: 3, seeded: false }]);
+      expect(result).toMatchObject({ rangesReplaced: 1, rangesInserted: 1 });
+    });
+
+    test("a run extending the live range back to a seeded point does not abort", async () => {
+      await forward(5, 4, { gitwatch: { version: "0.6" } });
+      await seedPoint("gitwatch", 2, false);
+      await backfill([hiddenEval(2, { gitwatch: { version: "0.6" } }), hiddenEval(3, { gitwatch: { version: "0.6" } })]);
+      expect(await seededRangesOf("gitwatch")).toEqual([{ first_seq: 2, last_seq: null, seeded: false }]);
+    });
+
+    test("a seeded point inside a run, not at its start, goes too: the real range covers it", async () => {
+      await forward(1, 1, { tool: { version: "1" } });
+      await forward(4);
+      await seedPoint("tool", 3);
+      await backfill([2, 3, 4].map((seq) => hiddenEval(seq, { tool: { version: "1" } })));
+      expect(await seededRangesOf("tool")).toEqual([{ first_seq: 2, last_seq: 4, seeded: false }]);
+    });
+  });
+
+  test("a full rerun moves commit_seq back to where unchanged content first appeared", async () => {
+    await forward(6, 7);
+    // Allowed partial run: seqs 2-3 missing, so tool is first seen at 4.
+    await backfill([hiddenEval(4, { tool: { version: "1" } }), hiddenEval(5, { tool: { version: "1" } })]);
+    expect((await rangesOf("tool")).map((r) => r.commit_seq)).toEqual([4]);
+    await backfill([2, 3, 4, 5].map((seq) => hiddenEval(seq, { tool: { version: "1" } })));
+    expect((await rangesOf("tool")).map((r) => [r.first_seq, r.last_seq, r.commit_seq])).toEqual([[2, 5, 2]]);
+  });
+
   describe("a partial run, repaired by re-running with every eval", () => {
     // The window is seqs 1-6, evaluated in batches of two; the fixed eval
     // landed at seq 7. What each hidden-only eval really lists:
@@ -835,6 +897,22 @@ describe("backfill (hidden-only evals of already-imported commits)", () => {
       );
       expect(() => assertEvalsComplete(expected, evals, { allowFailedEvals: true })).not.toThrow();
       expect(() => assertEvalsComplete(expected, evalsOf(ALL))).not.toThrow();
+    });
+
+    test("the gate refuses evals outside the window, even with the override", async () => {
+      await setup();
+      // --since from seq 3: a leftover archive of seq 2 must not widen it.
+      const expected = await rows<{ seq: number; hash: string; systems: string[] }>(SQL.BACKFILL_COMMITS, [
+        DAY(3),
+        6,
+        [SYSTEM],
+      ]);
+      expect(expected.map((r) => r.seq)).toEqual([3, 4, 5, 6]);
+      for (const allowFailedEvals of [false, true]) {
+        expect(() => assertEvalsComplete(expected, evalsOf([2, 3, 4, 5, 6]), { allowFailedEvals })).toThrow(
+          /1 eval is outside the window[\s\S]*seq 2\/x86_64-linux/,
+        );
+      }
     });
   });
 });

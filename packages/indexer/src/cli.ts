@@ -284,8 +284,7 @@ async function cmdBackfill(): Promise<void> {
     );
     const importedSeqs = new Map(imported.rows.map((r) => [r.system, r.seqs]));
 
-    const evals: BackfillEval[] = [];
-    for (const f of files) {
+    const located = files.map((f) => {
       const commit = byHash.get(f.commit);
       if (commit === undefined || !(importedSeqs.get(f.system) ?? []).includes(commit.seq)) {
         throw new Error(`${f.commit.slice(0, 12)}/${f.system} was never imported; backfill only fills in known commits`);
@@ -293,13 +292,19 @@ async function cmdBackfill(): Promise<void> {
       if (commit.seq > through) {
         throw new Error(`${f.commit.slice(0, 12)} is seq ${commit.seq}, after --through-seq ${through}`);
       }
-      const rows = evalRows(await readEvalArchive(f.path), f.commit, commit.committed_at, f.system);
-      evals.push({ system: f.system, seq: commit.seq, rows });
-    }
+      return { ...f, seq: commit.seq, committedAt: commit.committed_at };
+    });
+    // Every archive in the window, and (unless allowed) every commit in it
+    // with one, before reading any of them.
     const expected = await client.query<ExpectedCommit>(BACKFILL_COMMITS, [since, through, systems]);
-    const missing = assertEvalsComplete(expected.rows, evals, { allowFailedEvals });
+    const missing = assertEvalsComplete(expected.rows, located, { allowFailedEvals });
     if (missing.length > 0) {
       console.log(`::warning::${missing.length} expected evals missing; bridging them (--allow-failed-evals)`);
+    }
+    const evals: BackfillEval[] = [];
+    for (const f of located) {
+      const rows = evalRows(await readEvalArchive(f.path), f.commit, f.committedAt, f.system);
+      evals.push({ system: f.system, seq: f.seq, rows });
     }
     for (const system of [...new Set(evals.map((e) => e.system))].sort()) {
       const seqs = evals.filter((e) => e.system === system).map((e) => e.seq);

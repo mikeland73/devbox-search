@@ -70,6 +70,11 @@ gh workflow run backfill.yml -f since=2025-10-01 -f through_seq=<seq> -f dry_run
   a backfill wrote are marked (`variant_ranges.backfill_last_seq`), and
   within the window a rerun's evals replace them. The forward import's
   ranges are never replaced; overlapping one is still refused.
+- An archive outside the window (before `since`, or a system not in the
+  list) is refused even with the override, so a reused `--dir` can't widen
+  a hand run. A seed-era point range inside a backfilled range is replaced
+  by it, and unchanged content is dated from the earliest commit the
+  backfill saw it at.
 - Re-running the same window with the same evals writes nothing. Re-run
   with the same `since` and `through_seq` as before: once a backfill has
   extended the live ranges, the header's `through_seq` query no longer gives
