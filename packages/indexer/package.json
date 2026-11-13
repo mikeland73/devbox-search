@@ -24,10 +24,10 @@
     "better-sqlite3": "^13.0.3",
     "pg": "^8.23.1",
     "pg-copy-streams": "^7.0.0",
-    "stream-json": "^3.8.0"
+    "stream-json": "^3.9.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.15",
+    "@electric-sql/pglite": "^0.5.16",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
