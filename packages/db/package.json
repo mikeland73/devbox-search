@@ -25,7 +25,7 @@
     "migrate": "node dist/migrate.js"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.2.0",
+    "@neondatabase/serverless": "^1.2.1",
     "drizzle-orm": "^0.45.4",
     "pg": "^8.23.1",
     "@devbox-search/core": "workspace:*"
